@@ -123,14 +123,20 @@ class PytorchTrainer:
         torch.save(self.optimizer.state_dict(), f"/tmp/{artifact_path}/optimizer.pth")
         mlflow.log_artifact(f"/tmp/{artifact_path}/optimizer.pth", artifact_path=artifact_path)
 
-    def mlflow_metric_monitoring(self, epoch, metric_name, current_metric_value):
+    def mlflow_metric_monitoring(self, epoch, metric_name, current_metric_value, mode='max'):
         """
         Log model if target metric improved.
         """
 
         client = mlflow.client.MlflowClient()
         best_value = client.get_metric_history(mlflow.active_run().info.run_id, metric_name)
-        if len(best_value) == 0 or current_metric_value > max([m.value for m in best_value]):
+        if mode == 'max':
+            condition = len(best_value) == 0 or current_metric_value > max([m.value for m in best_value])
+        elif mode == 'min':
+            condition = len(best_value) == 0 or current_metric_value < min([m.value for m in best_value])
+        else:
+            raise ValueError(f"Unknown mode {mode} for metric monitoring.")
+        if condition:
             # log model as artifact
             self.mlflow_log_model_as_artifact(epoch, artifact_path=f"best_model_{metric_name}")
             print(f'New best {metric_name}={current_metric_value:.4f} at epoch {epoch+1}, model logged.')
