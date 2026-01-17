@@ -4,7 +4,7 @@ from pytorcher.models.unet.unet_parts import *
 from pytorcher.utils.processing import normalize_batch, rescale_batch
 
 class UNet(nn.Module):
-    def __init__(self, n_channels, n_classes, bilinear=False, layer_type='standard', normalize_input=False):
+    def __init__(self, n_channels, n_classes, global_conv=32, n_levels=3, bilinear=False, layer_type='standard', normalize_input=False):
         """
         :param n_channels: Number of input channels
         :param n_classes: Number of output channels
@@ -16,33 +16,42 @@ class UNet(nn.Module):
         self.n_channels = n_channels
         self.n_classes = n_classes
         self.bilinear = bilinear
-
-        self.inc = (DoubleConv(n_channels, 64, layer_type='standard')) # Initial layer uses standard convolution
-        self.down1 = (Down(64, 128, layer_type=layer_type))
-        self.down2 = (Down(128, 256, layer_type=layer_type))
-        self.down3 = (Down(256, 512, layer_type=layer_type))
-        factor = 2 if bilinear else 1
-        self.down4 = (Down(512, 1024 // factor, layer_type=layer_type))
-        self.up1 = (Up(1024, 512 // factor, bilinear, layer_type=layer_type))
-        self.up2 = (Up(512, 256 // factor, bilinear, layer_type=layer_type))
-        self.up3 = (Up(256, 128 // factor, bilinear, layer_type=layer_type))
-        self.up4 = (Up(128, 64, bilinear, layer_type=layer_type))
-        self.outc = (OutConv(64, n_classes, layer_type='standard')) # Output layer uses standard convolution
-
         self.normalize_input = normalize_input
+        # assert n_levels in [3, 4, 5], "Only 3 or 4 levels are supported currently."
+        self.n_levels = n_levels
+        #
+        self.inc = (DoubleConv(n_channels, global_conv, layer_type='standard')) # Initial layer uses standard convolution
+        #
+        self.downs = nn.ModuleList()
+        self.ups = nn.ModuleList()
+        factor = 2 if bilinear else 1
+        for i in range(1,n_levels+1):
+            j = n_levels - i + 1
+            if i < n_levels:
+                self.downs.append(Down(global_conv*(2**(i-1)), global_conv*(2**i), layer_type=layer_type))
+                self.ups.append(Up(global_conv*(2**j), (global_conv*(2**(j-1))) // factor, bilinear, layer_type=layer_type))
+            else:
+                self.downs.append(Down(global_conv*(2**(i-1)), (global_conv*(2**i)) // factor, layer_type=layer_type))
+                self.ups.append(Up(global_conv*(2**j), (global_conv*(2**(j-1))), bilinear, layer_type=layer_type))
+        #
+        self.outc = (OutConv(global_conv, n_classes, layer_type='standard')) # Output layer uses standard convolution
 
     def forward(self, x):
         if self.normalize_input:
             x, x_mins, x_maxs = normalize_batch(x, return_min_max=True)
         x1 = self.inc(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
-        x4 = self.down3(x3)
-        x5 = self.down4(x4)
-        x = self.up1(x5, x4)
-        x = self.up2(x, x3)
-        x = self.up3(x, x2)
-        x = self.up4(x, x1)
+        downs_outputs = []
+        x_temp = x1
+        for down in self.downs:
+            x_temp = down(x_temp)
+            downs_outputs.append(x_temp)
+        x_temp = downs_outputs[-1]
+        for i, up in enumerate(self.ups):
+            if i < self.n_levels - 1:
+                x_temp = up(x_temp, downs_outputs[-(i+2)])
+            else:
+                x_temp = up(x_temp, x1)
+        x = x_temp
         logits = self.outc(x)
         if self.normalize_input:
             logits = rescale_batch(logits, x_mins, x_maxs)
@@ -64,7 +73,8 @@ if __name__ == '__main__':
 
     from torchsummary import summary
 
-    unet = UNet(n_channels=1, n_classes=2, bilinear=True, layer_type='separable')
-    # cpu_device = torch.device("cpu")
-    # unet.to(cpu_device)
-    summary(unet, (1, 256, 256), device="cpu")
+    unet = UNet(n_channels=1, n_classes=1, global_conv=32, n_levels=4, bilinear=True, layer_type='standard')
+    unet.eval()
+    summary(unet, (1, 300, 300), device="cpu")
+
+    torch.onnx.export(unet, (torch.zeros(1, 1, 300, 300)), f='unet.onnx', input_names=['input'], output_names=['output'])
