@@ -2,27 +2,26 @@
 
 import torch
 import torch.nn as nn
+from torch.nn import Conv2d
 import torch.nn.functional as F
 
-from pytorcher.layers import SeparableConv2d
+from pytorcher.layers import SeparableConv2d, SinogramConv2d, SinogramSeparableConv2d
 
 
 class DoubleConv(nn.Module):
     """(convolution => [BN] => ReLU) * 2"""
 
-    def __init__(self, in_channels, out_channels, mid_channels=None, layer_type='standard'):
+    def __init__(self, in_channels, out_channels, mid_channels=None, layer_type='Conv2d', **kwargs):
         super().__init__()
         if not mid_channels:
             mid_channels = out_channels
-        if layer_type == 'separable':
-            conv_layer = SeparableConv2d
-        else:
-            conv_layer = nn.Conv2d
+        assert layer_type in globals().keys(), f"Layer type '{layer_type}' is not recognized."
+        conv_layer = globals()[layer_type]
         self.double_conv = nn.Sequential(
-            conv_layer(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
+            conv_layer(in_channels, mid_channels, kernel_size=3, bias=False, **kwargs),
             nn.BatchNorm2d(mid_channels),
             nn.ReLU(inplace=True),
-            conv_layer(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            conv_layer(mid_channels, out_channels, kernel_size=3, bias=False, **kwargs),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True)
         )
@@ -34,11 +33,11 @@ class DoubleConv(nn.Module):
 class Down(nn.Module):
     """Downscaling with maxpool then double conv"""
 
-    def __init__(self, in_channels, out_channels, layer_type='standard'):
+    def __init__(self, in_channels, out_channels, layer_type='Conv2d', **kwargs):
         super().__init__()
         self.maxpool_conv = nn.Sequential(
             nn.MaxPool2d(2),
-            DoubleConv(in_channels, out_channels, layer_type=layer_type)
+            DoubleConv(in_channels, out_channels, layer_type=layer_type, **kwargs)
         )
 
     def forward(self, x):
@@ -48,7 +47,7 @@ class Down(nn.Module):
 class Up(nn.Module):
     """Upscaling then double conv"""
 
-    def __init__(self, in_channels, out_channels, bilinear=True, layer_type='standard'):
+    def __init__(self, in_channels, out_channels, bilinear=True, layer_type='Conv2d', **kwargs):
         super().__init__()
 
         # if bilinear, use the normal convolutions to reduce the number of channels
@@ -75,12 +74,12 @@ class Up(nn.Module):
 
 
 class OutConv(nn.Module):
-    def __init__(self, in_channels, out_channels, layer_type='standard'):
+    def __init__(self, in_channels, out_channels, layer_type='Conv2d', **kwargs):
         super(OutConv, self).__init__()
         if layer_type == 'separable':
-            self.conv = SeparableConv2d(in_channels, out_channels, kernel_size=1)
+            self.conv = SeparableConv2d(in_channels, out_channels, kernel_size=1, **kwargs)
         else:
-            self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+            self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1, **kwargs)
 
     def forward(self, x):
         x = self.conv(x)
