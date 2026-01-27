@@ -74,12 +74,10 @@ class Up(nn.Module):
 
 
 class OutConv(nn.Module):
-    def __init__(self, in_channels, out_channels, layer_type='Conv2d', **kwargs):
+    def __init__(self, in_channels, out_channels, conv_layer_type='Conv2d', **kwargs):
         super(OutConv, self).__init__()
-        if layer_type == 'separable':
-            self.conv = SeparableConv2d(in_channels, out_channels, kernel_size=1, **kwargs)
-        else:
-            self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1, **kwargs)
+        conv_layer = globals()[conv_layer_type]
+        self.conv = conv_layer(in_channels, out_channels, kernel_size=1, **kwargs)
 
     def forward(self, x):
         x = self.conv(x)
