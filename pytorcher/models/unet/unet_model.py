@@ -4,7 +4,7 @@ from pytorcher.models.unet.unet_parts import *
 from pytorcher.utils.processing import normalize_batch, rescale_batch
 
 class UNet(nn.Module):
-    def __init__(self, n_channels, n_classes, global_conv=32, n_levels=3, bilinear=False, layer_type='Conv2d', normalize_input=False):
+    def __init__(self, n_channels, n_classes, global_conv=32, n_levels=3, bilinear=False, conv_layer_type='Conv2d', normalize_input=False):
         """
         :param n_channels: Number of input channels
         :param n_classes: Number of output channels
@@ -20,8 +20,8 @@ class UNet(nn.Module):
         assert n_levels in [3, 4], "Only 3 or 4 levels are supported currently."
         self.n_levels = n_levels
         #
-        layer_type_no_separable = layer_type.replace('Separable', '') # Ensure that separable convolutions are not used in initial, upsampling, and output layers
-        self.inc = (DoubleConv(n_channels, global_conv, layer_type=layer_type_no_separable)) # Initial layer uses standard convolution
+        conv_layer_type_no_separable = conv_layer_type.replace('Separable', '') # Ensure that separable convolutions are not used in initial, upsampling, and output layers
+        self.inc = (DoubleConv(n_channels, global_conv, layer_type=conv_layer_type_no_separable)) # Initial layer uses standard convolution
         #
         self.downs = nn.ModuleList()
         self.ups = nn.ModuleList()
@@ -29,13 +29,13 @@ class UNet(nn.Module):
         for i in range(1,n_levels+1):
             j = n_levels - i + 1
             if i < n_levels:
-                self.downs.append(Down(global_conv*(2**(i-1)), global_conv*(2**i), layer_type=layer_type))
-                self.ups.append(Up(global_conv*(2**j), (global_conv*(2**(j-1))) // factor, bilinear, layer_type=layer_type))
+                self.downs.append(Down(global_conv*(2**(i-1)), global_conv*(2**i), layer_type=conv_layer_type))
+                self.ups.append(Up(global_conv*(2**j), (global_conv*(2**(j-1))) // factor, bilinear, layer_type=conv_layer_type))
             else:
-                self.downs.append(Down(global_conv*(2**(i-1)), (global_conv*(2**i)) // factor, layer_type=layer_type))
-                self.ups.append(Up(global_conv*(2**j), (global_conv*(2**(j-1))), bilinear, layer_type=layer_type))
+                self.downs.append(Down(global_conv*(2**(i-1)), (global_conv*(2**i)) // factor, layer_type=conv_layer_type))
+                self.ups.append(Up(global_conv*(2**j), (global_conv*(2**(j-1))), bilinear, layer_type=conv_layer_type))
         #
-        self.outc = (OutConv(global_conv, n_classes, layer_type=layer_type_no_separable)) # Output layer uses standard convolution
+        self.outc = (OutConv(global_conv, n_classes, layer_type=conv_layer_type_no_separable)) # Output layer uses standard convolution
 
     def forward(self, x):
         if self.normalize_input:
