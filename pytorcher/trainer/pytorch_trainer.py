@@ -72,7 +72,8 @@ class PytorchTrainer:
             out.append(metric_class(**metric_config))
         if not any('loss' in m.name for m in out):
             out.append(getattr(__import__('pytorcher.metrics', fromlist=[metric_name]), 'Mean')(**{'name': 'loss'}))
-        return out
+        self.metrics = out
+        return self.metrics
 
     def reset_metrics(self):
         for metric in self.metrics:
