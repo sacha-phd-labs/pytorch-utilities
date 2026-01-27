@@ -18,10 +18,10 @@ class DoubleConv(nn.Module):
         assert layer_type in globals().keys(), f"Layer type '{layer_type}' is not recognized."
         conv_layer = globals()[layer_type]
         self.double_conv = nn.Sequential(
-            conv_layer(in_channels, mid_channels, kernel_size=3, bias=False, **kwargs),
+            conv_layer(in_channels, mid_channels, kernel_size=3, padding=1, bias=False, **kwargs),
             nn.BatchNorm2d(mid_channels),
             nn.ReLU(inplace=True),
-            conv_layer(mid_channels, out_channels, kernel_size=3, bias=False, **kwargs),
+            conv_layer(mid_channels, out_channels, kernel_size=3, padding=1, bias=False, **kwargs),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True)
         )

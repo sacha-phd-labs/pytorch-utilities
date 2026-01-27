@@ -53,7 +53,8 @@ class SinogramConv2d(nn.Module):
         self.radial_padding_mode = radial_padding_mode
         self.radial_dim = radial_dim
 
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, bias=bias, padding=0, **kwargs) # No padding here, will be applied manually in forward
+        kwargs.update({'padding': 0})  # No padding here, will be applied manually in forward
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, bias=bias, **kwargs) # No padding here, will be applied manually in forward
 
     def forward(self, x):
         # Mixed padding
