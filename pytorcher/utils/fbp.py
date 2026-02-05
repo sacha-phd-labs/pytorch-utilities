@@ -1,6 +1,6 @@
-import torch
-import math
+import torch, math
 
+from deepinv.physics.functional import IRadon as DeepInvIRadon
 
 def get_fourier_filter(size, filter_name, device):
     freqs = torch.fft.fftfreq(size, device=device).abs()
@@ -55,22 +55,21 @@ def interp1d_linear(t, xp, fp):
     return out.view(N, H, W)
 
 def iradon(
-    radon_image: torch.Tensor,          # (N, detectors, angles)
-    theta: torch.Tensor | None = None,
-    output_size: int | None = None,
-    filter_name="ramp",
+    sinogram,          # (N, detectors, angles)
+    output_size=None,
+    theta= None,
+    filter="ramp",
     circle=True,
 ):
-    if radon_image.ndim == 2:
-        radon_image = radon_image.unsqueeze(0)  # (1, D, A)
+    if sinogram.ndim == 2:
+        sinogram = sinogram.unsqueeze(0)  # (1, D, A)
 
-    if radon_image.ndim != 3:
-        raise ValueError("radon_image must be (N, detectors, angles)")
+    if sinogram.ndim != 3:
+        raise ValueError("sinogram must be (N, detectors, angles)")
 
-    device = radon_image.device
-    dtype = radon_image.dtype
-
-    N, num_detectors, num_angles = radon_image.shape
+    device = sinogram.device
+    dtype = sinogram.dtype
+    N, num_detectors, num_angles = sinogram.shape
 
     if theta is None:
         theta = torch.linspace(0, 180, num_angles, device=device)
@@ -85,10 +84,10 @@ def iradon(
     # Padding
     padded_size = max(64, 2 ** math.ceil(math.log2(2 * num_detectors)))
     pad = padded_size - num_detectors
-    img = torch.nn.functional.pad(radon_image, (0, 0, 0, pad))  # (N, padded, A)
+    img = torch.nn.functional.pad(sinogram, (0, 0, 0, pad))  # (N, padded, A)
 
     # Fourier filtering
-    fourier_filter = get_fourier_filter(padded_size, filter_name, device)  # (padded, 1)
+    fourier_filter = get_fourier_filter(padded_size, filter, device)  # (padded, 1)
     proj_fft = torch.fft.fft(img, dim=1) * fourier_filter  # broadcast over N
     radon_filtered = torch.real(torch.fft.ifft(proj_fft, dim=1))[:, :num_detectors]
 
@@ -124,6 +123,49 @@ def iradon(
 
     return recon * math.pi / num_angles
 
+def deepinv_iradon(
+        sinogram, # (N, detectors, angles)
+        in_size=None,
+        out_size=None,
+        theta=None,
+        circle=True,
+        filter=True
+    ):
+    """
+    Wrapper for deepinv.physics.functional.IRadon
+    """
+    assert filter == True, "Using unfiltered backprojection is not recommended for PET reconstruction. Please set filter=True."
+    #
+    if in_size is None:
+        in_size = sinogram.shape[-1]
+    if out_size is None:
+        out_size = sinogram.shape[-2]
+    # Pad sinogram if not square
+    if sinogram.shape[-1] != sinogram.shape[-2]:
+        max_side = max(sinogram.shape[-1], sinogram.shape[-2])
+        pad_y = (max_side - sinogram.shape[-2]) // 2
+        pad_x = (max_side - sinogram.shape[-1]) // 2
+        sinogram = torch.nn.functional.pad(
+            sinogram, (pad_x, pad_x, pad_y, pad_y), mode='constant', value=0
+        )
+    if theta is None:
+        theta = torch.linspace(0., 180., sinogram.shape[-2], dtype=sinogram.dtype, device=sinogram.device)
+    iradon = DeepInvIRadon(
+        in_size=in_size,
+        out_size=out_size,
+        theta=theta,
+        circle=circle,
+        device=sinogram.device,
+        use_filter=filter
+    )
+    image = iradon.forward(sinogram)
+    # Crop back to original size if padded
+    if image.shape[-1] != out_size:
+        crop_x = (image.shape[-1] - out_size) // 2
+        crop_y = (image.shape[-2] - out_size) // 2
+        image = image[:, :, crop_y:crop_y+out_size, crop_x:crop_x+out_size]
+    return image
+
 if __name__ == "__main__":
 
     from tools.image.castor import read_castor_binary_file
@@ -133,12 +175,12 @@ if __name__ == "__main__":
     # sino = torch.from_numpy(sino)  # [1, A, D]
     # angles = torch.linspace(0, math.pi, 300, device=sino.device)
 
-    # recon = iradon_torch(sino, angles, output_size=160, circle=False)
+    # recon = iradon_torch(sino, angles, out_size=160, circle=False)
     # plt.imshow(recon.cpu(), cmap="gray")
     # plt.show()
 
 
-    from skimage.transform import radon, iradon
+    from skimage.transform import radon, iradon as skimage_iradon
     import numpy as np
 
     import matplotlib.pyplot as plt
@@ -148,16 +190,23 @@ if __name__ == "__main__":
     theta = np.linspace(0, 180, 180, endpoint=False)
     sino = radon(img.copy(), theta=theta, circle=True)
 
-    recon_np = iradon(sino, theta=theta, circle=True)
-    recon_torch = iradon(torch.tensor(sino), torch.tensor(theta)).cpu().numpy()
+    recon_np = skimage_iradon(sino, theta=theta, circle=True)
+    #
+    sino_tensor = torch.from_numpy(sino).float().unsqueeze(0) # shape (1, D, A)
+    recon_torch = iradon(sino_tensor).cpu().numpy()
 
-    print(np.mean(np.abs(recon_np - recon_torch)))
+    sino_tensor = sino_tensor.unsqueeze(1) # shape (1, 1, D, A)
+    recon_torch_deepinv = deepinv_iradon(sino_tensor).cpu().numpy().squeeze()
 
-    fig, ax = plt.subplots(1,3)
+    print(np.mean(np.abs(recon_np - recon_torch.squeeze())))
+
+    fig, ax = plt.subplots(1,4)
     ax[0].imshow(img, cmap='gray')
     ax[0].set_title('Original Image')
     ax[1].imshow(recon_np, cmap='gray')
     ax[1].set_title('Reconstructed Image (skimage)')
-    ax[2].imshow(recon_torch, cmap='gray')
+    ax[2].imshow(recon_torch.squeeze(), cmap='gray')
     ax[2].set_title('Reconstructed Image (PyTorch)')
+    ax[3].imshow(recon_torch_deepinv, cmap='gray')
+    ax[3].set_title('Reconstructed Image (DeepInv)')
     plt.show()
