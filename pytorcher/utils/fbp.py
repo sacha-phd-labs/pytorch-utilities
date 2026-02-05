@@ -129,15 +129,14 @@ def deepinv_iradon(
         out_size=None,
         theta=None,
         circle=True,
-        filter=True
+        filter=True,
+        parallel_computation=True
     ):
     """
     Wrapper for deepinv.physics.functional.IRadon
     """
     assert filter == True, "Using unfiltered backprojection is not recommended for PET reconstruction. Please set filter=True."
     #
-    if in_size is None:
-        in_size = sinogram.shape[-1]
     if out_size is None:
         out_size = sinogram.shape[-2]
     # Pad sinogram if not square
@@ -148,6 +147,8 @@ def deepinv_iradon(
         sinogram = torch.nn.functional.pad(
             sinogram, (pad_x, pad_x, pad_y, pad_y), mode='constant', value=0
         )
+    if in_size is None:
+        in_size = sinogram.shape[-1]
     if theta is None:
         theta = torch.linspace(0., 180., sinogram.shape[-2], dtype=sinogram.dtype, device=sinogram.device)
     iradon = DeepInvIRadon(
@@ -156,7 +157,8 @@ def deepinv_iradon(
         theta=theta,
         circle=circle,
         device=sinogram.device,
-        use_filter=filter
+        use_filter=filter,
+        parallel_computation=parallel_computation
     )
     image = iradon.forward(sinogram)
     # Crop back to original size if padded
