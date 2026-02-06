@@ -1,10 +1,10 @@
 import torch
 
-from deepinv.physics.functional import Radon as DeepInvRadon, IRadon as DeepInvIRadon
+from deepinv.physics.functional import Radon as DeepInvRadon
 
 from pytorcher.utils.filters import apply_gaussian_psf_reflect, apply_rowwise_gaussian_psf
 
-def pet_forward(
+def pet_forward_radon(
         image,
         attenuation_map=None,
         n_angles=300,
