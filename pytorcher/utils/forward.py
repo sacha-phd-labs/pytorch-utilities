@@ -47,7 +47,7 @@ def pet_forward_radon(
     radon = DeepInvRadon(
         in_size=image.shape[-1],
         theta=theta,
-        circle=True,
+        circle=False,
     )
     sinogram = radon.forward(image)
 
@@ -103,17 +103,27 @@ if __name__ == "__main__":
     image = torch.from_numpy(image).unsqueeze(0).float().to(device) # shape (1, 1, H, W)
     attenuation_map = read_castor_binary_file(os.path.join(dest_path, 'object', 'attenuat_brain_phantom.hdr'), reader='numpy')
     attenuation_map = torch.from_numpy(attenuation_map).unsqueeze(0).float().to(device)
-    sinogram = pet_forward(
+    scanner_radius_mm = 300
+    voxel_size_mm = 2.0
+    sinogram = pet_forward_radon(
         image=image,
         attenuation_map=attenuation_map,
         n_angles=300,
-        scanner_radius_mm=300,
+        scanner_radius_mm=scanner_radius_mm,
         gaussian_PSF_fwhm_mm=4.0,
-        voxel_size_mm=2.0,
+        voxel_size_mm=voxel_size_mm,
         scale=2e-2 # approximately 1e6 counts
     )
 
-    backprojected_image = deepinv_iradon(sinogram.transpose(-2, -1) / 2e-2, filter=True, circle=True, out_size=image.shape[-1])
+    sinogram = torch.poisson(sinogram)
+
+    from math import sqrt
+
+    out_size = int(scanner_radius_mm * sqrt(2) / voxel_size_mm) # maximum inscribed square in the circular FOV
+    backprojected_image = deepinv_iradon(sinogram.transpose(-2, -1) / 2e-2, filter=True, circle=False, out_size=out_size)
+    pad_x = (backprojected_image.shape[-2] - image.shape[-2]) // 2
+    pad_y = (backprojected_image.shape[-1] - image.shape[-1]) // 2
+    backprojected_image = backprojected_image[:, :, pad_x:backprojected_image.shape[-2]-pad_x, pad_y:backprojected_image.shape[-1]-pad_y] # crop to original size
     print(f"Sinogram shape: {sinogram.shape}")
     print(f"Backprojected image shape: {backprojected_image.shape}")
 
