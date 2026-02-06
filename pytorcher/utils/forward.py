@@ -54,9 +54,18 @@ def pet_forward(
     # Apply attenuation if provided
     if attenuation_map is not None:
         assert voxel_size_mm[0] == voxel_size_mm[1], "Voxel size must be isotropic for attenuation application."
+        # We pass the attenuation map through the same padding as the image to ensure they are aligned
         attenuation_map = pad_(attenuation_map)
+        # The attenuation map is typically in units of cm^-1, so we need to convert it to mm^-1 for homogeneous units
         attenuation_scale_factor = 0.01 # cm^-1 to mm^-1
+        if gaussian_PSF_fwhm_mm is not None:
+            # In clinical context, the attenuation map is obtained from a CT scan and smoothed with the same PSF as the image
+            # to imitate the PSF of the PET system.
+            sigma_mm = gaussian_PSF_fwhm_mm / (2.0 * (torch.log(torch.tensor(2.0)))**0.5)
+            attenuation_map = apply_gaussian_psf_reflect(attenuation_map, sigma_mm)
+        # The attenuation along each ray can be computed by applying the radon transform to the attenuation map.
         att_sino = radon.forward(attenuation_map * attenuation_scale_factor)
+        # The expected counts along each ray are then scaled by the exponential of the negative attenuation, following the Beer-Lambert law.
         sinogram = sinogram * torch.exp(-att_sino * voxel_size_mm[0]) # assuming square pixels
 
     # Transpose sinogram to have shape (angles, bins)
