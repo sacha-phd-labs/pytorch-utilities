@@ -10,7 +10,7 @@ def pet_forward_radon(
         n_angles=300,
         scanner_radius_mm=300,
         gaussian_PSF_fwhm_mm=None,
-        voxel_size_mm=1.0,
+        voxel_size_mm=2.0,
         scale=None # scale = acquisition_time * np.log(2) / half_life
 ):
     #
@@ -81,7 +81,9 @@ def pet_forward_radon(
 
     # Scale sinogram to match expected counts
     if scale is not None:
-        sinogram = sinogram * scale
+        if scale.ndim == 0:
+            scale = scale.repeat(sinogram.shape[0]) # make it a vector of shape (batch_size,)
+        sinogram = sinogram * scale.view(-1, 1, 1, 1) # scale each row accordingly
 
     return sinogram
 
