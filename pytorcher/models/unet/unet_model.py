@@ -14,7 +14,6 @@ class UNet(nn.Module):
                  conv_layer_type='Conv2d',
                  residual=False,
                  normalize_input=False,
-                 output_size='same'
         ):
         """
         :param n_channels: Number of input channels
@@ -23,7 +22,6 @@ class UNet(nn.Module):
         :param conv_layer_type: Type of convolutional layer to use ('Conv2d', 'SeparableConv2d', 'SinogramConv2d', 'SinogramSeparableConv2d'). Standard convolutions will always be used for upsampling layers, pre-concvolution layers, and the output layer.
         :param residual: Whether to use residual connections in double convolution blocks.
         :param normalize_input: Whether to normalize the input in the range [0, 1] before feeding it to the network. If set to True, output will be rescaled accordingly to match the input scale.
-        :param output_size: 'same' to have the same output size as input, (H, W) to enforce specific output size with resize after the last convolution.
         """
         super(UNet, self).__init__()
         self.n_channels = n_channels
@@ -49,8 +47,6 @@ class UNet(nn.Module):
                 self.ups.append(Up(global_conv*(2**j), (global_conv*(2**(j-1))), bilinear, layer_type=conv_layer_type, residual=residual))
         #
         self.outc = (OutConv(global_conv, n_classes, conv_layer_type=conv_layer_type_no_separable)) # Output layer uses standard convolution
-        #
-        self.output_size = output_size
 
     def forward(self, x):
         if self.normalize_input:
@@ -69,8 +65,6 @@ class UNet(nn.Module):
                 x_temp = up(x_temp, x1)
         x = x_temp
         logits = self.outc(x)
-        if hasattr(self, 'output_size') and isinstance(self.output_size, tuple):
-            logits = torch.nn.functional.interpolate(logits, size=self.output_size, mode='bilinear', align_corners=False)
         if self.normalize_input:
             logits = rescale_batch(logits, x_mins, x_maxs)
         return logits
