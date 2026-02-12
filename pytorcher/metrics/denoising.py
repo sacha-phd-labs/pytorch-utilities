@@ -55,7 +55,12 @@ class PSNR(Metric):
         self.max_val = float(max_val)
         self.eps = float(eps)
 
-    def update_state(self, y_true, y_pred, sample_weight=None):
+    def update_state(self, y_true, y_pred, sample_weight=None, bkg_val=0.0):
+        #
+        if bkg_val is not None:
+            mask = y_true > bkg_val
+            y_true = torch.where(mask, y_true, torch.nan)
+            y_pred = torch.where(mask, y_pred, torch.nan)
         # Convert to torch float tensors
         y_true_t = _as_float_tensor(y_true)
         y_pred_t = _as_float_tensor(y_pred)
@@ -70,7 +75,7 @@ class PSNR(Metric):
         y_pred_t = y_pred_t.to(device=y_true_t.device)
 
         # compute per-image MSE over channels and spatial dims
-        mse = torch.mean((y_true_t - y_pred_t) ** 2, dim=(1, 2, 3))
+        mse = torch.nanmean((y_true_t - y_pred_t) ** 2, dim=(1, 2, 3))
         psnr = 20.0 * torch.log10(torch.tensor(self.max_val, dtype=mse.dtype, device=mse.device) / torch.sqrt(mse + self.eps))
 
         batch_total = float(torch.sum(psnr).item())
@@ -95,49 +100,55 @@ class SSIM(Metric):
         sigma: gaussian sigma used for window (default 1.5)
     """
 
-    def __init__(self, name: Optional[str] = None, max_val: float = 1.0, window_size: int = 11, sigma: float = 1.5):
+    def __init__(self, name: Optional[str] = None, K1: float = 0.01, K2: float = 0.03, L: float = 1.0, window_size: int = 11, sigma: float = 1.5):
         super().__init__(name or "ssim")
-        self.max_val = float(max_val)
+        self.K1 = float(K1)
+        self.K2 = float(K2)
+        self.L = float(L)
         self.window_size = int(window_size)
         self.sigma = float(sigma)
 
-    def _ssim_map(self, X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
-        """Compute SSIM map for two batches X and Y with shape (B, C, H, W)."""
-        # kernel
-        device = X.device
-        dtype = X.dtype
-        kernel = _gaussian_kernel(self.window_size, self.sigma, dtype=dtype, device=device)
+    def nanvar(self, x: torch.Tensor, correction=1):
 
-        B, C, H, W = X.shape
+        dims = (1, 2, 3)
 
-        # convolve per-channel using groups
-        kernel = kernel.expand(C, 1, self.window_size, self.window_size)
+        mask = ~torch.isnan(x)
+        count = mask.sum(dim=dims, keepdim=True)
 
-        # padding to keep same size
-        padding = self.window_size // 2
+        mean = torch.nanmean(x, dim=dims, keepdim=True)
 
-        mu_x = F.conv2d(X, kernel, groups=C, padding=padding)
-        mu_y = F.conv2d(Y, kernel, groups=C, padding=padding)
+        X_filled = torch.where(mask, x, mean)
 
-        mu_x_sq = mu_x * mu_x
-        mu_y_sq = mu_y * mu_y
-        mu_xy = mu_x * mu_y
+        var = torch.sum((X_filled - mean) ** 2 * mask, dim=dims, keepdim=True) / (count - correction)
 
-        sigma_x_sq = F.conv2d(X * X, kernel, groups=C, padding=padding) - mu_x_sq
-        sigma_y_sq = F.conv2d(Y * Y, kernel, groups=C, padding=padding) - mu_y_sq
-        sigma_xy = F.conv2d(X * Y, kernel, groups=C, padding=padding) - mu_xy
+        return var
 
-        # constants to stabilize the division with weak denominators
-        c1 = (0.01 * self.max_val) ** 2
-        c2 = (0.03 * self.max_val) ** 2
+    def masked_cov(self, img1, img2, mask, correction=1):
+        dims = (1, 2, 3)
+        mask = mask.bool()
 
-        numerator = (2 * mu_xy + c1) * (2 * sigma_xy + c2)
-        denominator = (mu_x_sq + mu_y_sq + c1) * (sigma_x_sq + sigma_y_sq + c2)
+        n = mask.sum(dim=dims, keepdim=True)  # (B,1,1,1)
 
-        ssim_map = numerator / (denominator + 1e-12)
-        return ssim_map
+        # Zero out invalid pixels
+        x = torch.where(mask, img1, torch.zeros_like(img1))
+        y = torch.where(mask, img2, torch.zeros_like(img2))
 
-    def update_state(self, y_true, y_pred, sample_weight=None):
+        mean_x = x.sum(dim=dims, keepdim=True) / n.clamp(min=1)
+        mean_y = y.sum(dim=dims, keepdim=True) / n.clamp(min=1)
+
+        cov = ((x - mean_x) * (y - mean_y) * mask).sum(dim=dims, keepdim=True)
+
+        cov = cov / (n - correction).clamp(min=1)
+
+        return cov
+
+    def update_state(self, y_true, y_pred, sample_weight=None, bkg_val=0.0):
+        # Apply background mask if specified
+        if bkg_val is not None:
+            mask = y_true != bkg_val
+            y_true = torch.where(mask, y_true, torch.nan)
+            y_pred = torch.where(mask, y_pred, torch.nan)
+
         # Convert to float tensors
         X = _as_float_tensor(y_true)
         Y = _as_float_tensor(y_pred)
@@ -157,10 +168,16 @@ class SSIM(Metric):
             if Y.dim() == 4 and Y.shape[-1] == X.shape[1]:
                 Y = Y.permute(0, 3, 1, 2)
 
-        # compute ssim map and average per-image
-        ssim_map = self._ssim_map(X, Y)
-        # mean over channels and spatial dims -> per-image value
-        ssim_per_image = torch.mean(ssim_map, dim=(1, 2, 3))
+        C1 = (self.K1 * self.L) ** 2
+        C2 = (self.K2 * self.L) ** 2
+
+        mu1 = torch.nanmean(X, dim=(1, 2, 3), keepdim=True)
+        mu2 = torch.nanmean(Y, dim=(1, 2, 3), keepdim=True)
+        sigma1_sq = self.nanvar(X, correction=0)
+        sigma2_sq = self.nanvar(Y, correction=0)
+        sigma12 = self.masked_cov(X, Y, mask=mask, correction=0)
+
+        ssim_per_image = ((2 * mu1 * mu2 + C1) * (2 * sigma12 + C2)) / ((mu1 ** 2 + mu2 ** 2 + C1) * (sigma1_sq + sigma2_sq + C2))
 
         batch_total = float(torch.sum(ssim_per_image).item())
         batch_count = float(ssim_per_image.numel())
