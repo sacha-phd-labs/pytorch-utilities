@@ -123,50 +123,63 @@ def iradon(
 
     return recon * math.pi / num_angles
 
-def deepinv_iradon(
-        sinogram, # (N, detectors, angles)
-        in_size=None,
-        out_size=None,
-        theta=None,
-        circle=True,
-        filter=True,
-        parallel_computation=True
+class FBPReconstructor(torch.nn.Module):
+
+    def __init__(
+            self,
+            n_angles=300,
+            scanner_radius_mm=300,
+            voxel_size_mm=2.0,
+            image_size=(160,160),
+            device=None
     ):
-    """
-    Wrapper for deepinv.physics.functional.IRadon
-    """
-    assert filter == True, "Using unfiltered backprojection is not recommended for PET reconstruction. Please set filter=True."
-    #
-    if out_size is None:
-        out_size = sinogram.shape[-2]
-    # Pad sinogram if not square
-    if sinogram.shape[-1] != sinogram.shape[-2]:
-        max_side = max(sinogram.shape[-1], sinogram.shape[-2])
-        pad_y = (max_side - sinogram.shape[-2]) // 2
-        pad_x = (max_side - sinogram.shape[-1]) // 2
-        sinogram = torch.nn.functional.pad(
-            sinogram, (pad_x, pad_x, pad_y, pad_y), mode='constant', value=0
+        super(FBPReconstructor, self).__init__()
+        self.n_angles = n_angles
+        self.scanner_radius_mm = scanner_radius_mm
+        self.voxel_size_mm = voxel_size_mm
+        if not isinstance(self.voxel_size_mm, (list, tuple)):
+            self.voxel_size_mm = [self.voxel_size_mm] * 2
+        self.image_size = image_size
+        #
+        if device is not None:
+            self.to(device)
+
+    def get_iradon_operator(self, sino):
+        #
+        self.theta = torch.linspace(0., 180., self.n_angles, dtype=sino.dtype, device=sino.device)
+        self.in_size = max(sino.shape[-2], sino.shape[-1]) # We take max as image is to be padded to square if not already
+        self.out_size = int(self.scanner_radius_mm * math.sqrt(2) / max(self.voxel_size_mm))
+        self.iradon = DeepInvIRadon(
+            in_size=self.in_size,
+            out_size=self.out_size,
+            theta=self.theta,
+            circle=True,
+            device=sino.device,
+            use_filter=True,
+            parallel_computation=True
         )
-    if in_size is None:
-        in_size = sinogram.shape[-1]
-    if theta is None:
-        theta = torch.linspace(0., 180., sinogram.shape[-2], dtype=sinogram.dtype, device=sinogram.device)
-    iradon = DeepInvIRadon(
-        in_size=in_size,
-        out_size=out_size,
-        theta=theta,
-        circle=circle,
-        device=sinogram.device,
-        use_filter=filter,
-        parallel_computation=parallel_computation
-    )
-    image = iradon.forward(sinogram)
-    # Crop back to original size if padded
-    if image.shape[-1] != out_size:
-        crop_x = (image.shape[-1] - out_size) // 2
-        crop_y = (image.shape[-2] - out_size) // 2
-        image = image[:, :, crop_y:crop_y+out_size, crop_x:crop_x+out_size]
-    return image
+        
+    def forward(self, sinogram):
+        # Pad sinogram if not square
+        if sinogram.shape[-1] != sinogram.shape[-2]:
+            max_side = max(sinogram.shape[-1], sinogram.shape[-2])
+            pad_y = (max_side - sinogram.shape[-2]) // 2
+            pad_x = (max_side - sinogram.shape[-1]) // 2
+            sinogram = torch.nn.functional.pad(
+                sinogram, (pad_x, pad_x, pad_y, pad_y), mode='constant', value=0
+            )
+        #
+        if not hasattr(self, 'iradon') or self.in_size != sinogram.shape[-1]:
+            self.get_iradon_operator(sinogram)
+        #
+        image = self.iradon.forward(sinogram)
+        # Crop back to original size if padded
+        if image.shape[-1] != self.image_size[-1] or image.shape[-2] != self.image_size[-2]:
+            crop_x = (image.shape[-1] - self.image_size[-1]) // 2
+            crop_y = (image.shape[-2] - self.image_size[-2]) // 2
+            image = image[:, :, crop_y:crop_y+self.image_size[-2], crop_x:crop_x+self.image_size[-1]]
+        #
+        return image
 
 if __name__ == "__main__":
 
