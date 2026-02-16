@@ -59,6 +59,7 @@ class PetForwardRadon(torch.nn.Module):
         # Image domain PSF
         if self.gaussian_PSF_fwhm_mm is not None:
             sigma_mm = self.gaussian_PSF_fwhm_mm / (4.0 * (torch.log(torch.tensor(2.0)))**0.5)
+            image = apply_gaussian_psf_reflect(image, sigma_mm / self.voxel_size_mm[0]) # assuming square pixels
 
         # Pad image to fit in scanner radius
         image = self.pad_(image)
@@ -79,7 +80,7 @@ class PetForwardRadon(torch.nn.Module):
                 # In clinical context, the attenuation map is obtained from a CT scan and smoothed with the same PSF as the image
                 # to imitate the PSF of the PET system.
                 sigma_mm = self.gaussian_PSF_fwhm_mm / (2.0 * (torch.log(torch.tensor(2.0)))**0.5)
-                attenuation_map = apply_gaussian_psf_reflect(attenuation_map, sigma_mm)
+                attenuation_map = apply_gaussian_psf_reflect(attenuation_map, sigma_mm / self.voxel_size_mm[0]) # assuming square pixels
             # The attenuation along each ray can be computed by applying the radon transform to the attenuation map.
             att_sino = self.radon.forward(attenuation_map * attenuation_scale_factor)
             # The expected counts along each ray are then scaled by the exponential of the negative attenuation, following the Beer-Lambert law.
