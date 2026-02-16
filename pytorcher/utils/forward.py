@@ -56,13 +56,12 @@ class PetForwardRadon(torch.nn.Module):
         if attenuation_map is not None:
             assert image.shape == attenuation_map.shape, "Image and attenuation map must have the same shape."
 
-        # Pad image to fit in scanner radius
-        image = self.pad_(image)
-
         # Image domain PSF
         if self.gaussian_PSF_fwhm_mm is not None:
             sigma_mm = self.gaussian_PSF_fwhm_mm / (4.0 * (torch.log(torch.tensor(2.0)))**0.5)
-            image = apply_gaussian_psf_reflect(image, sigma_mm)
+
+        # Pad image to fit in scanner radius
+        image = self.pad_(image)
 
         # Radon transform
         if not hasattr(self, 'radon') or self.in_size != image.shape[-1]:
