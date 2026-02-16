@@ -96,6 +96,8 @@ class PetForwardRadon(torch.nn.Module):
 
         # Scale sinogram to match expected counts
         if scale is not None:
+            if not isinstance(scale, torch.Tensor):
+                scale = torch.tensor(scale, device=sinogram.device)
             if scale.ndim == 0:
                 scale = scale.repeat(sinogram.shape[0]) # make it a vector of shape (batch_size,)
             sinogram = sinogram * scale.view(-1, 1, 1, 1) # scale each row accordingly
@@ -105,21 +107,24 @@ class PetForwardRadon(torch.nn.Module):
 
 if __name__ == "__main__":
 
-    cuda_available = torch.cuda.is_available()
-    assert cuda_available, "CUDA is required to run this example."
-    device = torch.device('cuda')
+    device = torch.device('cpu')
 
     from tools.image.castor import read_castor_binary_file
     import os
 
-    from pytorcher.utils.fbp import deepinv_iradon
+    from pytorcher.utils.fbp import FBPReconstructor
 
     # Example usage
-    dest_path = f"{os.getenv('WORKSPACE')}/data/brain_web_phantom"
-    image = read_castor_binary_file(os.path.join(dest_path, 'object', 'gt_web_after_scaling.hdr'), reader='numpy')
-    image = torch.from_numpy(image).unsqueeze(0).float().to(device) # shape (1, 1, H, W)
-    attenuation_map = read_castor_binary_file(os.path.join(dest_path, 'object', 'attenuat_brain_phantom.hdr'), reader='numpy')
-    attenuation_map = torch.from_numpy(attenuation_map).unsqueeze(0).float().to(device)
+    # dest_path = f"{os.getenv('WORKSPACE')}/data/brain_web_phantom"
+    # image = read_castor_binary_file(os.path.join(dest_path, 'object', 'gt_web_after_scaling.hdr'), reader='numpy')
+    # image = torch.from_numpy(image).unsqueeze(0).float().to(device) # shape (1, 1, H, W)
+    # attenuation_map = read_castor_binary_file(os.path.join(dest_path, 'object', 'attenuat_brain_phantom.hdr'), reader='numpy')
+    # attenuation_map = torch.from_numpy(attenuation_map).unsqueeze(0).float().to(device)
+
+    image = torch.zeros((1, 16, 128, 128), device=device)
+    image[:, :, 32:96, 32:96] = 1.0
+    attenuation_map = torch.zeros((1, 16, 128, 128), device=device)
+
     scanner_radius_mm = 300
     voxel_size_mm = 2.0
 
@@ -131,19 +136,21 @@ if __name__ == "__main__":
         device=device
     )
 
-    sinogram = pet_forward.forward(image, attenuation_map=attenuation_map)
+    sinogram = pet_forward.forward(image, attenuation_map=attenuation_map, scale=0.02)
 
     sinogram = torch.poisson(sinogram)
 
-    from math import sqrt
+    sinogram = sinogram.transpose(-2, -1) # shape (1, A, D)
 
-    out_size = int(scanner_radius_mm * sqrt(2) / voxel_size_mm) # maximum inscribed square in the circular FOV
-    backprojected_image = deepinv_iradon(sinogram.transpose(-2, -1) / 2e-2, filter=True, circle=True, out_size=out_size)
-    pad_x = (backprojected_image.shape[-2] - image.shape[-2]) // 2
-    pad_y = (backprojected_image.shape[-1] - image.shape[-1]) // 2
-    backprojected_image = backprojected_image[:, :, pad_x:backprojected_image.shape[-2]-pad_x, pad_y:backprojected_image.shape[-1]-pad_y] # crop to original size
-    print(f"Sinogram shape: {sinogram.shape}")
-    print(f"Backprojected image shape: {backprojected_image.shape}")
+    fbp_reconstructor = FBPReconstructor(
+        n_angles=300,
+        scanner_radius_mm=scanner_radius_mm,
+        voxel_size_mm=voxel_size_mm,
+        image_size=image.shape[-2:],
+        device=device
+    )
+
+    recon = fbp_reconstructor.forward(sinogram)
 
     import matplotlib.pyplot as plt
 
@@ -155,7 +162,7 @@ if __name__ == "__main__":
     ax[1].imshow(sinogram.cpu().squeeze(), cmap='gray')
     ax[1].set_title('Sinogram')
 
-    ax[2].imshow(backprojected_image.cpu().squeeze(), cmap='gray_r')
-    ax[2].set_title('Backprojected Image')
+    ax[2].imshow(recon.cpu().squeeze(), cmap='gray_r')
+    ax[2].set_title('FBP Reconstruction')
 
     plt.show()
