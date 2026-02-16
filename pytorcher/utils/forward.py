@@ -86,9 +86,6 @@ class PetForwardRadon(torch.nn.Module):
             # The expected counts along each ray are then scaled by the exponential of the negative attenuation, following the Beer-Lambert law.
             sinogram = sinogram * torch.exp(-att_sino * self.voxel_size_mm[0]) # assuming square pixels
 
-        # Transpose sinogram to have shape (angles, bins)
-        sinogram = sinogram.transpose(-2, -1)
-
         # PSF in sinogram domain
         if self.gaussian_PSF_fwhm_mm is not None: 
             sigma_mm = self.gaussian_PSF_fwhm_mm / (4.0 * (torch.log(torch.tensor(2.0)))**0.5)
