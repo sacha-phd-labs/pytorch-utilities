@@ -148,7 +148,23 @@ class Down(nn.Module):
 
     def forward(self, x):
         return self.maxpool_conv(x)
+    
+class ResizeConv(nn.Module):
+    """Interpolation followed by convolution for image-to-image translation."""
+    
+    def __init__(self, in_channels, scale_factor=2, mode='bilinear', layer_type='Conv2d', residual=False, **kwargs):
+        super().__init__()
+        self.scale_factor = scale_factor
+        self.mode = mode
+        self.convs = nn.Sequential(
+            DoubleConv(in_channels, in_channels * 2, layer_type=layer_type, residual=False, **kwargs),
+            DoubleConv(in_channels * 2, in_channels, layer_type=layer_type, residual=residual, **kwargs),
+        )
 
+    def forward(self, x):
+        x = F.interpolate(x, scale_factor=self.scale_factor, mode=self.mode, align_corners=True)
+        x = self.convs(x)
+        return x
 
 class Up(nn.Module):
     """Upscaling then double conv"""
