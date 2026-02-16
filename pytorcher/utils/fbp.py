@@ -153,7 +153,7 @@ class FBPReconstructor(torch.nn.Module):
             in_size=self.in_size,
             out_size=self.out_size,
             theta=self.theta,
-            circle=True,
+            circle=False,
             device=sino.device,
             use_filter=True,
             parallel_computation=True
