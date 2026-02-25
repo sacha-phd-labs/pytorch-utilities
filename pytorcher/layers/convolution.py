@@ -109,20 +109,22 @@ class DoubleConv(nn.Module):
         conv_layer = globals()[layer_type]
         
         self.residual = residual
+        conv1 = conv_layer(in_channels, mid_channels, kernel_size=3, padding=1, bias=False, **kwargs)
+        conv2 = conv_layer(mid_channels, out_channels, kernel_size=3, padding=1, bias=False, **kwargs)
+        nn.init.dirac_(conv1.weight)
+        nn.init.dirac_(conv2.weight)
         self.double_conv = nn.Sequential(
-            conv_layer(in_channels, mid_channels, kernel_size=3, padding=1, bias=False, **kwargs),
-            nn.BatchNorm2d(mid_channels),
-            nn.ReLU(inplace=True),
-            conv_layer(mid_channels, out_channels, kernel_size=3, padding=1, bias=False, **kwargs),
-            nn.BatchNorm2d(out_channels),
-            # nn.ReLU(inplace=True)
+            conv1,
+            nn.LeakyReLU(inplace=True),
+            conv2,
         )
-        self.act = nn.ReLU(inplace=True)
+        self.act = nn.LeakyReLU(inplace=True)
         if residual and in_channels != out_channels:
             # If residual and dimensions do not match, add a 1x1 convolution to add a learnable projection and match dimensions
             conv_layer_type_no_separable = layer_type.replace('Separable', '')
             conv_layer = globals()[conv_layer_type_no_separable]
             self.residual_conv = conv_layer(in_channels, out_channels, kernel_size=1, bias=False, **kwargs)
+            nn.init.zeros_(self.residual_conv.weight)
 
     def forward(self, x):
         if self.residual:
