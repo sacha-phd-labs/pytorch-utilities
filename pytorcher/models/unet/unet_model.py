@@ -51,7 +51,7 @@ class UNet(nn.Module):
         #
         self.outc = (OutConv(global_conv, n_classes, conv_layer_type=conv_layer_type_no_separable)) # Output layer uses standard convolution
 
-    def compute_skip_connection(self, x):
+    def compute_skip_connection(self, x, **kwargs):
         """
         Placeholder for any specific processing of skip connections before concatenation in the decoder.
         By default, it returns the input as is, but this method can be overriden in subclasses to implement specific processing if needed.
@@ -59,18 +59,18 @@ class UNet(nn.Module):
         x = nn.Identity()(x)
         return x
     
-    def get_in_out_ratio(self, size=(300, 300)):
+    def get_in_out_ratio(self, size=(300, 300), **kwargs):
         """
         Computes the ratio of input to output spatial dimensions based on the operation defined in skip connections.
         This is used to determine if any resizing is needed in the bottleneck layer.
         If resizing is needed, the ResizeConv layer with extra convolutions will be added in the bottleneck to learn a better mapping between the encoder and decoder features.
         """
         dummy_input = torch.zeros(1, 1, *size)
-        dummy_output = self.compute_skip_connection(dummy_input)
+        dummy_output = self.compute_skip_connection(dummy_input, **kwargs)
         in_out_ratio = (dummy_output.shape[2] / dummy_input.shape[2], dummy_output.shape[3] / dummy_input.shape[3])
         return in_out_ratio
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         x1 = self.inc(x)
         skip_connections = [x1, ]
         x_temp = x1
@@ -83,7 +83,7 @@ class UNet(nn.Module):
         #
         # SKIP CONNECTIONS
         for i, skip_connection in enumerate(skip_connections):
-            skip_connections[i] = self.compute_skip_connection(skip_connection)
+            skip_connections[i] = self.compute_skip_connection(skip_connection, **kwargs)
         #
         # DECODER
         for i, up in enumerate(self.ups):
