@@ -195,12 +195,19 @@ class Up(nn.Module):
         return self.conv(x)
     
 class OutConv(nn.Module):
-    def __init__(self, in_channels, out_channels, conv_layer_type='Conv2d', **kwargs):
+    def __init__(self, in_channels, out_channels, conv_layer_type='Conv2d', act='softplus', **kwargs):
         super(OutConv, self).__init__()
         conv_layer = globals()[conv_layer_type]
         self.conv = conv_layer(in_channels, out_channels, kernel_size=1, **kwargs)
+        nn.init.dirac_(self.conv.weight)
+        if act.lower() == 'sigmoid':
+            self.act = nn.Sigmoid()
+        elif act.lower() == 'softplus':
+            self.act = nn.Softplus()
+        else:
+            raise ValueError(f"Unsupported activation '{act}' for output layer. Supported activations are 'sigmoid' and 'softplus'.")
 
     def forward(self, x):
         x = self.conv(x)
-        x = nn.Sigmoid()(x)
+        x = self.act(x)
         return x
