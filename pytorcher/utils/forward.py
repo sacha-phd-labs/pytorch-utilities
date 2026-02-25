@@ -2,7 +2,7 @@ import torch
 
 from deepinv.physics.functional import Radon as DeepInvRadon
 
-from pytorcher.utils.filters import apply_gaussian_psf_reflect, apply_rowwise_gaussian_psf
+from pytorcher.utils.filters import apply_gaussian_psf_reflect, apply_columnwise_gaussian_psf
 
 class PetForwardRadon(torch.nn.Module):
 
@@ -92,7 +92,7 @@ class PetForwardRadon(torch.nn.Module):
             # 1D sigma in sinogram domain on each row
             bin_widths_mm = torch.abs(self.voxel_size_mm[0] * torch.cos(self.theta * torch.pi / 180.0)) + torch.abs(self.voxel_size_mm[1] * torch.sin(self.theta * torch.pi / 180.0))
             sigma_sino_mm = sigma_mm / bin_widths_mm
-            sinogram = apply_rowwise_gaussian_psf(sinogram, sigmas=sigma_sino_mm)
+            sinogram = apply_columnwise_gaussian_psf(sinogram, sigmas=sigma_sino_mm)
 
         # Scale sinogram to match expected counts
         if scale is not None:

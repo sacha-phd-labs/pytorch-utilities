@@ -75,3 +75,6 @@ def apply_rowwise_gaussian_psf(image, sigmas, kernel_size=None):
     # Reshape back
     out = out.view(B, H, C, W).permute(0, 2, 1, 3)  # (B,C,H,W)
     return out
+
+def apply_columnwise_gaussian_psf(image, sigmas, kernel_size=None):
+    return apply_rowwise_gaussian_psf(image.transpose(2, 3), sigmas, kernel_size).transpose(2, 3)
