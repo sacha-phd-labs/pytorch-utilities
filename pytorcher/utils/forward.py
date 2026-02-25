@@ -51,7 +51,12 @@ class PetForwardRadon(torch.nn.Module):
             raise ValueError("Image size exceeds scanner field of view.")
         return img
     
-    def forward(self, image, attenuation_map=None, scale=None):
+    def forward(self, image, attenuation_map=None, scale=None, voxel_size_mm=None):
+        if voxel_size_mm is not None:
+            if not isinstance(voxel_size_mm, (list, tuple)):
+                voxel_size_mm = [voxel_size_mm] * 2
+            self.voxel_size_mm = voxel_size_mm
+        assert self.voxel_size_mm is not None, "Voxel size must be specified either during initialization or in the forward method."
         #
         if attenuation_map is not None:
             assert image.shape == attenuation_map.shape, "Image and attenuation map must have the same shape."
