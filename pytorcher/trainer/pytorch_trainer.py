@@ -2,10 +2,12 @@ import torch
 import abc
 import mlflow
 import os
+import numpy as np
+import random
 
 class PytorchTrainer:
 
-    def __init__(self, metrics=[]):
+    def __init__(self, metrics=[], seed=42, **kwargs):
 
         # device
         self.device = self.get_device()
@@ -21,6 +23,13 @@ class PytorchTrainer:
 
         #
         self.initial_epoch = 0
+        #
+        self.set_seed(seed)
+
+    def set_seed(self, seed=None):
+        if seed is not None:
+            torch.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
 
     def get_device(self):
         # Create device for training (GPU if available)
@@ -90,39 +99,76 @@ class PytorchTrainer:
             else:
                 metric.update_state(y_true, y_pred)
 
-    def load_model_and_optimizer(self, artifact_path):
-        """Properly load model and optimizer state from mlflow artifacts."""
-        #
+    def load_checkpoint(self, artifact_path):
+        """Properly load model, optimizer, and RNG state from mlflow artifacts."""
+
         try:
-            mlflow.artifacts.download_artifacts(artifact_path=artifact_path, dst_path="/tmp", run_id=mlflow.active_run().info.run_id)
+            mlflow.artifacts.download_artifacts(
+                artifact_path=artifact_path,
+                dst_path="/tmp",
+                run_id=mlflow.active_run().info.run_id,
+            )
         except mlflow.exceptions.MlflowException:
             print("No reboot model found in mlflow artifacts.")
             return
-        #
-        local_model_path = f"/tmp/{artifact_path}/model.pth"
-        local_epoch_path = f"/tmp/{artifact_path}/epoch.txt"
-        local_optimizer_path = f"/tmp/{artifact_path}/optimizer.pth"
-        if os.path.exists(local_model_path) and os.path.exists(local_epoch_path) and os.path.exists(local_optimizer_path):
-            self.model.load_state_dict(torch.load(local_model_path))
-            with open(local_epoch_path, "r") as f:
-                self.initial_epoch = int(f.read()) + 1
-            self.optimizer.load_state_dict(torch.load(local_optimizer_path))
-            print(f"Rebooted model from epoch {self.initial_epoch}")
-        else:
+
+        checkpoint_path = f"/tmp/{artifact_path}/checkpoint.pth"
+        if not os.path.exists(checkpoint_path):
             print("No reboot model found in mlflow artifacts.")
+            return
+        else:
+            checkpoint = torch.load(checkpoint_path, weights_only=False) # weights_only False allows to load numpy and python RNG states as well, not only torch RNG state
 
-    def mlflow_log_model_as_artifact(self, epoch, artifact_path):
+            # Load model
+            self.model.load_state_dict(checkpoint["model"])
 
-        # log reboot model as artifact
+            # Load optimizer
+            self.optimizer.load_state_dict(checkpoint["optimizer"])
+
+            # Load epoch
+            self.initial_epoch = checkpoint["epoch"] + 1
+
+            # Restore RNG states
+            torch.set_rng_state(checkpoint["torch_rng_state"])
+
+            if torch.cuda.is_available() and checkpoint["cuda_rng_state"] is not None:
+                torch.cuda.set_rng_state_all(checkpoint["cuda_rng_state"])
+
+            np.random.set_state(checkpoint["numpy_rng_state"])
+            random.setstate(checkpoint["python_rng_state"])
+
+            if 'dataloader_rng_state' in checkpoint and self.loader_train is not None and hasattr(self.loader_train, 'generator') and self.loader_train.generator is not None:
+                self.loader_train.generator.set_state(checkpoint["dataloader_rng_state"])
+
+            print(f"Rebooted model from epoch {self.initial_epoch}.")
+
+    def mlflow_log_checkpoint_as_artifact(self, epoch, artifact_path):
+
         os.makedirs(f"/tmp/{artifact_path}", exist_ok=True)
-        torch.save(self.model.state_dict(), f"/tmp/{artifact_path}/model.pth")
-        with open(f"/tmp/{artifact_path}/epoch.txt", "w") as f:
-            f.write(str(epoch))
-        mlflow.log_artifact(f"/tmp/{artifact_path}/model.pth", artifact_path=artifact_path)
-        mlflow.log_artifact(f"/tmp/{artifact_path}/epoch.txt", artifact_path=artifact_path)
-        # save optimizer state
-        torch.save(self.optimizer.state_dict(), f"/tmp/{artifact_path}/optimizer.pth")
-        mlflow.log_artifact(f"/tmp/{artifact_path}/optimizer.pth", artifact_path=artifact_path)
+        checkpoint = {
+            "model": self.model.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "epoch": epoch,
+
+        }
+
+        # Save RNG states
+        rng_state = {
+            "torch_rng_state": torch.get_rng_state(),
+            "cuda_rng_state": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            "numpy_rng_state": np.random.get_state(),
+            "python_rng_state": random.getstate(),
+        }
+        if self.loader_train is not None and hasattr(self.loader_train, 'generator') and self.loader_train.generator is not None:
+            rng_state["dataloader_rng_state"] = self.loader_train.generator.get_state()
+            #
+        checkpoint.update(rng_state)
+
+        #
+        torch.save(checkpoint, f"/tmp/{artifact_path}/checkpoint.pth")
+
+        #
+        mlflow.log_artifact(f"/tmp/{artifact_path}/checkpoint.pth", artifact_path=artifact_path)
 
     def mlflow_metric_monitoring(self, epoch, metric_name, current_metric_value, mode='max'):
         """
@@ -139,7 +185,7 @@ class PytorchTrainer:
             raise ValueError(f"Unknown mode {mode} for metric monitoring.")
         if condition:
             # log model as artifact
-            self.mlflow_log_model_as_artifact(epoch, artifact_path=f"best_model_{metric_name}")
+            self.mlflow_log_checkpoint_as_artifact(epoch, artifact_path=f"best_model_{metric_name}")
             print(f'New best {metric_name}={current_metric_value:.4f} at epoch {epoch+1}, model logged.')
 
 
