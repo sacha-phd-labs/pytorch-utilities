@@ -109,12 +109,12 @@ class PytorchTrainer:
                 run_id=mlflow.active_run().info.run_id,
             )
         except mlflow.exceptions.MlflowException:
-            print("No reboot model found in mlflow artifacts.")
+            print(f"No model found in mlflow artifacts at {artifact_path}")
             return
 
         checkpoint_path = f"/tmp/{artifact_path}/checkpoint.pth"
         if not os.path.exists(checkpoint_path):
-            print("No reboot model found in mlflow artifacts.")
+            print(f"No model found in mlflow artifacts at {artifact_path}")
             return
         else:
             checkpoint = torch.load(checkpoint_path, weights_only=False) # weights_only False allows to load numpy and python RNG states as well, not only torch RNG state
@@ -139,8 +139,6 @@ class PytorchTrainer:
 
             if 'dataloader_rng_state' in checkpoint and self.loader_train is not None and hasattr(self.loader_train, 'generator') and self.loader_train.generator is not None:
                 self.loader_train.generator.set_state(checkpoint["dataloader_rng_state"])
-
-            print(f"Rebooted model from epoch {self.initial_epoch}.")
 
     def mlflow_log_checkpoint_as_artifact(self, epoch, artifact_path):
 
