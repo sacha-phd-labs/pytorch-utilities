@@ -101,7 +101,7 @@ class SinogramSeparableConv2d(nn.Module):
 class DoubleConv(nn.Module):
     """(convolution => [BN] => ReLU) * 2"""
 
-    def __init__(self, in_channels, out_channels, mid_channels=None, layer_type='Conv2d', residual=False, **kwargs):
+    def __init__(self, in_channels, out_channels, mid_channels=None, layer_type='Conv2d', residual=False, init='dirac', **kwargs):
         super().__init__()
         if not mid_channels:
             mid_channels = out_channels
@@ -111,8 +111,17 @@ class DoubleConv(nn.Module):
         self.residual = residual
         conv1 = conv_layer(in_channels, mid_channels, kernel_size=3, padding=1, bias=False, **kwargs)
         conv2 = conv_layer(mid_channels, out_channels, kernel_size=3, padding=1, bias=False, **kwargs)
-        nn.init.dirac_(conv1.weight)
-        nn.init.dirac_(conv2.weight)
+        if init == 'dirac':
+            nn.init.dirac_(conv1.weight)
+            nn.init.dirac_(conv2.weight)
+        elif init == 'zeros':
+            pass
+            nn.init.zeros_(conv1.weight)
+            nn.init.zeros_(conv2.weight)
+        elif init is None or init.lower() == 'none':
+            pass
+        else:
+            raise ValueError(f"Unsupported initialization '{init}' for DoubleConv layers. Supported initializations are 'dirac' and 'zeros'.")
         self.double_conv = nn.Sequential(
             conv1,
             nn.LeakyReLU(inplace=True),
@@ -124,7 +133,7 @@ class DoubleConv(nn.Module):
             conv_layer_type_no_separable = layer_type.replace('Separable', '')
             conv_layer = globals()[conv_layer_type_no_separable]
             self.residual_conv = conv_layer(in_channels, out_channels, kernel_size=1, bias=False, **kwargs)
-            nn.init.zeros_(self.residual_conv.weight)
+            # nn.init.zeros_(self.residual_conv.weight)
 
     def forward(self, x):
         if self.residual:
@@ -141,11 +150,11 @@ class DoubleConv(nn.Module):
 class Down(nn.Module):
     """Downscaling with maxpool then double conv"""
 
-    def __init__(self, in_channels, out_channels, layer_type='Conv2d', residual=False, **kwargs):
+    def __init__(self, in_channels, out_channels, layer_type='Conv2d', residual=False, init='dirac', **kwargs):
         super().__init__()
         self.maxpool_conv = nn.Sequential(
             nn.MaxPool2d(2),
-            DoubleConv(in_channels, out_channels, layer_type=layer_type, residual=residual, **kwargs)
+            DoubleConv(in_channels, out_channels, layer_type=layer_type, residual=residual, init=init, **kwargs)
         )
 
     def forward(self, x):
@@ -154,13 +163,13 @@ class Down(nn.Module):
 class ResizeConv(nn.Module):
     """Interpolation followed by convolution for image-to-image translation."""
     
-    def __init__(self, in_channels, scale_factor=2, mode='bilinear', layer_type='Conv2d', residual=False, **kwargs):
+    def __init__(self, in_channels, scale_factor=2, mode='bilinear', layer_type='Conv2d', residual=False, init='dirac', **kwargs):
         super().__init__()
         self.scale_factor = scale_factor
         self.mode = mode
         self.convs = nn.Sequential(
-            DoubleConv(in_channels, in_channels * 2, layer_type=layer_type, residual=False, **kwargs),
-            DoubleConv(in_channels * 2, in_channels, layer_type=layer_type, residual=residual, **kwargs),
+            DoubleConv(in_channels, in_channels * 2, layer_type=layer_type, residual=False, init=init, **kwargs),
+            DoubleConv(in_channels * 2, in_channels, layer_type=layer_type, residual=residual, init=init, **kwargs),
         )
 
     def forward(self, x):
@@ -171,16 +180,16 @@ class ResizeConv(nn.Module):
 class Up(nn.Module):
     """Upscaling then double conv"""
 
-    def __init__(self, in_channels, out_channels, bilinear=True, layer_type='Conv2d', residual=False, **kwargs):
+    def __init__(self, in_channels, out_channels, bilinear=True, layer_type='Conv2d', residual=False, init='dirac', **kwargs):
         super().__init__()
 
         # if bilinear, use the normal convolutions to reduce the number of channels
         if bilinear:
             self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
-            self.conv = DoubleConv(in_channels, out_channels, in_channels // 2, layer_type=layer_type, residual=residual)
+            self.conv = DoubleConv(in_channels, out_channels, in_channels // 2, layer_type=layer_type, residual=residual, init=init, **kwargs)
         else:
             self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
-            self.conv = DoubleConv(in_channels, out_channels, layer_type=layer_type, residual=residual)
+            self.conv = DoubleConv(in_channels, out_channels, layer_type=layer_type, residual=residual, init=init, **kwargs)
 
     def forward(self, x1, x2):
         x1 = self.up(x1)
@@ -197,15 +206,24 @@ class Up(nn.Module):
         return self.conv(x)
     
 class OutConv(nn.Module):
-    def __init__(self, in_channels, out_channels, conv_layer_type='Conv2d', act='softplus', **kwargs):
+    def __init__(self, in_channels, out_channels, conv_layer_type='Conv2d', act='softplus', init='dirac', **kwargs):
         super(OutConv, self).__init__()
         conv_layer = globals()[conv_layer_type]
         self.conv = conv_layer(in_channels, out_channels, kernel_size=1, **kwargs)
-        nn.init.dirac_(self.conv.weight)
-        if act.lower() == 'sigmoid':
+        if init == 'dirac':
+            nn.init.dirac_(self.conv.weight)
+        elif init == 'zeros':
+            nn.init.zeros_(self.conv.weight)
+        elif init is None or init.lower() == 'none':
+            pass
+        else:
+            raise ValueError(f"Unsupported initialization '{init}' for output layer. Supported initializations are 'dirac' and 'zeros'.")
+        if act is not None and act.lower() == 'sigmoid':
             self.act = nn.Sigmoid()
-        elif act.lower() == 'softplus':
+        elif act is not None and act.lower() == 'softplus':
             self.act = nn.Softplus()
+        elif act is None or act.lower() == 'none':
+            self.act = nn.Identity()
         else:
             raise ValueError(f"Unsupported activation '{act}' for output layer. Supported activations are 'sigmoid' and 'softplus'.")
 
