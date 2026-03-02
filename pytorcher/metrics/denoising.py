@@ -50,15 +50,16 @@ class PSNR(Metric):
         eps: small epsilon to avoid divide-by-zero
     """
 
-    def __init__(self, name: Optional[str] = None, max_val: float = 1.0, eps: float = 1e-10):
+    def __init__(self, name: Optional[str] = None, max_val: float = 1.0, eps: float = 1e-10, bkg_val: Optional[float] = None):
         super().__init__(name or "psnr")
         self.max_val = float(max_val)
         self.eps = float(eps)
+        self.bkg_val = bkg_val
 
-    def update_state(self, y_true, y_pred, sample_weight=None, bkg_val=0.0):
+    def update_state(self, y_true, y_pred, sample_weight=None):
         #
-        if bkg_val is not None:
-            mask = y_true > bkg_val
+        if self.bkg_val is not None:
+            mask = y_true > self.bkg_val
             y_true = torch.where(mask, y_true, torch.nan)
             y_pred = torch.where(mask, y_pred, torch.nan)
         # Convert to torch float tensors
@@ -100,13 +101,14 @@ class SSIM(Metric):
         sigma: gaussian sigma used for window (default 1.5)
     """
 
-    def __init__(self, name: Optional[str] = None, K1: float = 0.01, K2: float = 0.03, L: float = 1.0, window_size: int = 11, sigma: float = 1.5):
+    def __init__(self, name: Optional[str] = None, K1: float = 0.01, K2: float = 0.03, L: float = 1.0, window_size: int = 11, sigma: float = 1.5, bkg_val: Optional[float] = None):
         super().__init__(name or "ssim")
         self.K1 = float(K1)
         self.K2 = float(K2)
         self.L = float(L)
         self.window_size = int(window_size)
         self.sigma = float(sigma)
+        self.bkg_val = bkg_val
 
     def nanvar(self, x: torch.Tensor, correction=1):
 
@@ -142,10 +144,10 @@ class SSIM(Metric):
 
         return cov
 
-    def update_state(self, y_true, y_pred, sample_weight=None, bkg_val=0.0):
+    def update_state(self, y_true, y_pred, sample_weight=None):
         # Apply background mask if specified
-        if bkg_val is not None:
-            mask = y_true != bkg_val
+        if self.bkg_val is not None:
+            mask = y_true != self.bkg_val
             y_true = torch.where(mask, y_true, torch.nan)
             y_pred = torch.where(mask, y_pred, torch.nan)
 
