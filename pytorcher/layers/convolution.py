@@ -101,7 +101,7 @@ class SinogramSeparableConv2d(nn.Module):
 class DoubleConv(nn.Module):
     """(convolution => [BN] => ReLU) * 2"""
 
-    def __init__(self, in_channels, out_channels, mid_channels=None, layer_type='Conv2d', residual=False, init='dirac', **kwargs):
+    def __init__(self, in_channels, out_channels, mid_channels=None, layer_type='Conv2d', residual=False, init='none', **kwargs):
         super().__init__()
         if not mid_channels:
             mid_channels = out_channels
@@ -133,7 +133,8 @@ class DoubleConv(nn.Module):
             conv_layer_type_no_separable = layer_type.replace('Separable', '')
             conv_layer = globals()[conv_layer_type_no_separable]
             self.residual_conv = conv_layer(in_channels, out_channels, kernel_size=1, bias=False, **kwargs)
-            # nn.init.zeros_(self.residual_conv.weight)
+            if init == 'dirac' or init == 'zeros':
+                nn.init.zeros_(self.residual_conv.weight)
 
     def forward(self, x):
         if self.residual:
@@ -206,7 +207,7 @@ class Up(nn.Module):
         return self.conv(x)
     
 class OutConv(nn.Module):
-    def __init__(self, in_channels, out_channels, conv_layer_type='Conv2d', act='softplus', init='dirac', **kwargs):
+    def __init__(self, in_channels, out_channels, conv_layer_type='Conv2d', act='softplus', init='none', **kwargs):
         super(OutConv, self).__init__()
         conv_layer = globals()[conv_layer_type]
         self.conv = conv_layer(in_channels, out_channels, kernel_size=1, **kwargs)
