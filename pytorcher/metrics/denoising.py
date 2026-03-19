@@ -16,15 +16,7 @@ import torch.nn.functional as F
 
 from pytorcher.metrics import Metric
 
-
-def _as_float_tensor(x: torch.Tensor) -> torch.Tensor:
-    """Convert input to torch float tensor.
-
-    Accepts numpy arrays or torch tensors. Returns a torch.float32 tensor.
-    """
-    if not isinstance(x, torch.Tensor):
-        x = torch.as_tensor(x)
-    return x.to(dtype=torch.float32)
+from pytorcher.metrics.base import _as_float_tensor
 
 
 def _gaussian_kernel(window_size: int = 11, sigma: float = 1.5, dtype: torch.dtype = torch.float32, device=None):
