@@ -2,6 +2,17 @@ import abc
 from typing import Optional
 from numpy.typing import ArrayLike
 
+import torch
+
+def _as_float_tensor(x: torch.Tensor) -> torch.Tensor:
+    """Convert input to torch float tensor.
+
+    Accepts numpy arrays or torch tensors. Returns a torch.float32 tensor.
+    """
+    if not isinstance(x, torch.Tensor):
+        x = torch.as_tensor(x)
+    return x.to(dtype=torch.float32)
+
 class Metric:
     """
     Base metric interface inspired by Keras.
