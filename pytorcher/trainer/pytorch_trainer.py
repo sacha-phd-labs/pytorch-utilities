@@ -17,7 +17,7 @@ class PytorchTrainer:
         self.model = self.create_model()
         self.model = self.model.to(self.device)
         self.signature = self.get_signature()
-        self.optimizer = self.get_optimizer(learning_rate=self.learning_rate)
+        self.optimizer = self.get_optimizer()
         self.objective = self.get_objective()
         self.metrics = self.get_metrics(metrics)
 
