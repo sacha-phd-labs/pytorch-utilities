@@ -92,12 +92,15 @@ class PytorchTrainer:
         for metric in self.metrics:
             metric.reset_states()
 
-    def update_metrics(self, loss, y_true, y_pred):
+    def update_metrics(self, y_true, y_pred):
+        for metric in self.metrics:
+            if 'loss' not in metric.name:
+                metric.update_state(y_true, y_pred)
+
+    def update_loss(self, loss):
         for metric in self.metrics:
             if 'loss' in metric.name:
                 metric.update_state(None, loss)
-            else:
-                metric.update_state(y_true, y_pred)
 
     def load_checkpoint(self, artifact_path):
         """Properly load model, optimizer, and RNG state from mlflow artifacts."""
