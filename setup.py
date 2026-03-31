@@ -18,8 +18,7 @@ setup(
     packages=find_packages(exclude=["tests", "docs"]),
     include_package_data=True,
     install_requires=[
-        "pytorch==2.9.1+cu128",
-        "deepinv",
+        "pytorch==2.9.1+cu128"
     ],
     python_requires=">=3.8",
     license="MIT",
