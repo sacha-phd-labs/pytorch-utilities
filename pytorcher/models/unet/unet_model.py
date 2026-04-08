@@ -15,7 +15,8 @@ class UNet(nn.Module):
                  out_act='softplus', # Softplus is a common choice for the output activation in image-to-image translation tasks as it allows for positive outputs while avoiding the hard saturation of sigmoid. However, this can be changed to 'sigmoid' or None if needed.
                  residual=False,
                  residual_conv=False,
-                 init='none'
+                 init='none',
+                 dropout=0.0,
         ):
         """
         :param n_channels: Number of input channels
@@ -27,6 +28,7 @@ class UNet(nn.Module):
         :param out_act: Activation function to use in the output layer. Supported values are 'sigmoid', 'softplus', and None (or 'none'). If using residual connection between input and output, the output layer should not have an activation function to allow for negative values in the output if needed.
         :param residual: Whether to use residual connection between input and output of the U-Net.
         :param residual_conv: Whether to use residual connections in double convolution blocks.
+        :param dropout: Dropout probability for the dropout layers. If 0.0, no dropout will be applied.
         """
         super(UNet, self).__init__()
         self.n_channels = n_channels
@@ -46,15 +48,15 @@ class UNet(nn.Module):
         for i in range(1,n_levels+1):
             j = n_levels - i + 1
             if i < n_levels:
-                self.downs.append(Down(global_conv*(2**(i-1)), global_conv*(2**i), layer_type=conv_layer_type, residual=residual_conv, init=init))
-                self.ups.append(Up(global_conv*(2**j), (global_conv*(2**(j-1))) // factor, bilinear, layer_type=conv_layer_type, residual=residual_conv, init=init))
+                self.downs.append(Down(global_conv*(2**(i-1)), global_conv*(2**i), layer_type=conv_layer_type, residual=residual_conv, init=init, dropout=dropout))
+                self.ups.append(Up(global_conv*(2**j), (global_conv*(2**(j-1))) // factor, bilinear, layer_type=conv_layer_type, residual=residual_conv, init=init, dropout=dropout))
             else:
-                bottleneck = [Down(global_conv*(2**(i-1)), (global_conv*(2**i)) // factor, layer_type=conv_layer_type, residual=residual_conv, init=init)]
+                bottleneck = [Down(global_conv*(2**(i-1)), (global_conv*(2**i)) // factor, layer_type=conv_layer_type, residual=residual_conv, init=init, dropout=dropout)]
                 in_out_ratio = self.get_in_out_ratio()
                 if in_out_ratio != (1.0,1.0):
-                    bottleneck.append(ResizeConv((global_conv*(2**i)) // factor, scale_factor=in_out_ratio, mode='bilinear', layer_type=conv_layer_type_no_separable, residual=residual_conv, init=init))
+                    bottleneck.append(ResizeConv((global_conv*(2**i)) // factor, scale_factor=in_out_ratio, mode='bilinear', layer_type=conv_layer_type_no_separable, residual=residual_conv, init=init, dropout=dropout))
                 self.downs.append(nn.Sequential(*bottleneck))
-                self.ups.append(Up(global_conv*(2**j), (global_conv*(2**(j-1))), bilinear, layer_type=conv_layer_type, residual=residual_conv, init=init))
+                self.ups.append(Up(global_conv*(2**j), (global_conv*(2**(j-1))), bilinear, layer_type=conv_layer_type, residual=residual_conv, init=init, dropout=dropout))
         #
         if self.residual:
             assert n_channels == n_classes, "For residual connection between input and output, the number of input channels must be equal to the number of output channels."

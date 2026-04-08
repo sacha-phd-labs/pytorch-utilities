@@ -1,6 +1,9 @@
 import torch
-
-from deepinv.physics.functional import Radon as DeepInvRadon
+import numpy as np
+try:
+    from torch_radon import Radon
+except ImportError:
+    print("torch_radon is not installed. Please install it to use PetForwardRadon.")
 
 from pytorcher.utils.filters import apply_gaussian_psf_reflect, apply_columnwise_gaussian_psf
 
@@ -11,8 +14,7 @@ class PetForwardRadon(torch.nn.Module):
             n_angles=300,
             scanner_radius_mm=300,
             gaussian_PSF_fwhm_mm=4.0,
-            voxel_size_mm=2.0,
-            device=None
+            voxel_size_mm=2.0
     ):
         super(PetForwardRadon, self).__init__()
         self.n_angles = n_angles
@@ -22,27 +24,35 @@ class PetForwardRadon(torch.nn.Module):
         if not isinstance(self.voxel_size_mm, (list, tuple)):
             self.voxel_size_mm = [self.voxel_size_mm] * 2
         #
-        if device is not None:
-            self.to(device)
+        assert torch.cuda.is_available(), "CUDA is not available. PetForwardRadon requires CUDA support."
+        self.to(torch.device('cuda'))
 
     def get_radon_operator(self, image):
-        self.theta = torch.linspace(0., 180., self.n_angles, dtype=image.dtype, device=image.device)
+        self.theta = torch.linspace(0., np.pi, self.n_angles, dtype=image.dtype, device=image.device)
         self.in_size = image.shape[-1]
-        self.radon = DeepInvRadon(
-            in_size=image.shape[-1],
-            theta=self.theta,
-            circle=False,
+        self.radon = Radon(
+            resolution=image.shape[-1],
+            angles=self.theta,
+            clip_to_circle=True,
+            det_count=image.shape[-1],
+            det_spacing=1.0
         )
+
+    def radon_forward(self, image):
+        if not hasattr(self, 'radon') or self.in_size != image.shape[-1]:
+            self.get_radon_operator(image)
+        out = self.radon.forward(image)
+        return out.transpose(-2, -1)
 
     def pad_(self, img):
         # Pad img to fit in scanner radius
         img_size = torch.tensor(img.shape).max()
-        if torch.sqrt(torch.tensor(2.0)) * self.scanner_radius_mm >= img_size * max(self.voxel_size_mm):
+        if 2.0 * self.scanner_radius_mm >= img_size * max(self.voxel_size_mm):
             pad_x = int(
-                (torch.sqrt(torch.tensor(2.0)) * self.scanner_radius_mm - img.shape[-2] * self.voxel_size_mm[0]) / (2 * self.voxel_size_mm[0])
+                (2.0 * self.scanner_radius_mm - img.shape[-2] * self.voxel_size_mm[0]) / (2 * self.voxel_size_mm[0])
             )
             pad_y = int(
-                (torch.sqrt(torch.tensor(2.0)) * self.scanner_radius_mm - img.shape[-1] * self.voxel_size_mm[1]) / (2 * self.voxel_size_mm[1])
+                (2.0 * self.scanner_radius_mm - img.shape[-1] * self.voxel_size_mm[1]) / (2 * self.voxel_size_mm[1])
             )
             img = torch.nn.functional.pad(
                 img, (pad_x, pad_x, pad_y, pad_y), mode='constant', value=0
@@ -72,7 +82,7 @@ class PetForwardRadon(torch.nn.Module):
         # Radon transform
         if not hasattr(self, 'radon') or self.in_size != image.shape[-1]:
             self.get_radon_operator(image)
-        sinogram = self.radon.forward(image)
+        sinogram = self.radon_forward(image)
 
         # Apply attenuation if provided
         if attenuation_map is not None:
@@ -87,7 +97,7 @@ class PetForwardRadon(torch.nn.Module):
                 sigma_mm = self.gaussian_PSF_fwhm_mm / (2.0 * (torch.log(torch.tensor(2.0)))**0.5)
                 attenuation_map = apply_gaussian_psf_reflect(attenuation_map, sigma_mm / self.voxel_size_mm[0]) # assuming square pixels
             # The attenuation along each ray can be computed by applying the radon transform to the attenuation map.
-            att_sino = self.radon.forward(attenuation_map * attenuation_scale_factor)
+            att_sino = self.radon_forward(attenuation_map * attenuation_scale_factor)
             # The expected counts along each ray are then scaled by the exponential of the negative attenuation, following the Beer-Lambert law.
             sinogram = sinogram * torch.exp(-att_sino * self.voxel_size_mm[0]) # assuming square pixels
 
@@ -112,23 +122,13 @@ class PetForwardRadon(torch.nn.Module):
 
 if __name__ == "__main__":
 
-    device = torch.device('cpu')
+    device = torch.device('cuda')
 
-    from tools.image.castor import read_castor_binary_file
-    import os
+    from pytorcher.utils.fbp import iradon
 
-    from pytorcher.utils.fbp import FBPReconstructor
-
-    # Example usage
-    # dest_path = f"{os.getenv('WORKSPACE')}/data/brain_web_phantom"
-    # image = read_castor_binary_file(os.path.join(dest_path, 'object', 'gt_web_after_scaling.hdr'), reader='numpy')
-    # image = torch.from_numpy(image).unsqueeze(0).float().to(device) # shape (1, 1, H, W)
-    # attenuation_map = read_castor_binary_file(os.path.join(dest_path, 'object', 'attenuat_brain_phantom.hdr'), reader='numpy')
-    # attenuation_map = torch.from_numpy(attenuation_map).unsqueeze(0).float().to(device)
-
-    image = torch.zeros((1, 16, 128, 128), device=device)
-    image[:, :, 32:96, 32:96] = 1.0
-    attenuation_map = torch.zeros((1, 16, 128, 128), device=device)
+    image = torch.ones((2, 16, 160, 160), device=device)
+    # image[:, :, 32:96, 32:96] = 10.0
+    attenuation_map = torch.zeros((2, 16, 160, 160), device=device)
 
     scanner_radius_mm = 300
     voxel_size_mm = 2.0
@@ -137,37 +137,28 @@ if __name__ == "__main__":
         n_angles=300,
         scanner_radius_mm=scanner_radius_mm,
         gaussian_PSF_fwhm_mm=4.0,
-        voxel_size_mm=voxel_size_mm,
-        device=device
+        voxel_size_mm=voxel_size_mm
     )
 
     sinogram = pet_forward.forward(image, attenuation_map=attenuation_map, scale=0.02)
 
+    print(sinogram.sum())
+
     sinogram = torch.poisson(sinogram)
 
-    sinogram = sinogram.transpose(-2, -1) # shape (1, A, D)
-
-    fbp_reconstructor = FBPReconstructor(
-        n_angles=300,
-        scanner_radius_mm=scanner_radius_mm,
-        voxel_size_mm=voxel_size_mm,
-        image_size=image.shape[-2:],
-        device=device
-    )
-
-    recon = fbp_reconstructor.forward(sinogram)
+    recon = iradon(sinogram, theta=pet_forward.theta.cpu().numpy(), output_size=image.shape[-1], filter='ramp', circle=False)
 
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(1, 3)
 
-    ax[0].imshow(image.cpu().squeeze(), cmap='gray_r')
+    ax[0].imshow(image[0, 0, ...].cpu().squeeze(), cmap='gray_r')
     ax[0].set_title('Original Image')
 
-    ax[1].imshow(sinogram.cpu().squeeze(), cmap='gray')
+    ax[1].imshow(sinogram[0, 0, ...].cpu().squeeze(), cmap='gray')
     ax[1].set_title('Sinogram')
 
-    ax[2].imshow(recon.cpu().squeeze(), cmap='gray_r')
+    ax[2].imshow(recon[0, 0, ...].cpu().squeeze(), cmap='gray_r')
     ax[2].set_title('FBP Reconstruction')
 
     plt.show()

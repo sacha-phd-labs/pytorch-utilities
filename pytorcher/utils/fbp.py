@@ -55,26 +55,36 @@ def interp1d_linear(t, xp, fp):
     return out.view(N, H, W)
 
 def iradon(
-    sinogram,          # (N, detectors, angles)
+    sinogram,          # (..., detectors, angles)
     output_size=None,
     theta= None,
     filter="ramp",
     circle=True,
 ):
+    if sinogram.ndim < 2:
+        raise ValueError("sinogram must be (..., detectors, angles)")
+
+    squeeze_batch = False
     if sinogram.ndim == 2:
         sinogram = sinogram.unsqueeze(0)  # (1, D, A)
-
-    if sinogram.ndim != 3:
-        raise ValueError("sinogram must be (N, detectors, angles)")
+        squeeze_batch = True
 
     device = sinogram.device
     dtype = sinogram.dtype
-    N, num_detectors, num_angles = sinogram.shape
+    leading_shape = sinogram.shape[:-2]
+    num_detectors, num_angles = sinogram.shape[-2:]
+    sinogram = sinogram.reshape(-1, num_detectors, num_angles)
+    N = sinogram.shape[0]
 
     if theta is None:
-        theta = torch.linspace(0, 180, num_angles, device=device)
-
-    theta = torch.deg2rad(theta)
+        theta = torch.linspace(0, torch.pi, num_angles, device=device, dtype=dtype)
+    else:
+        theta = torch.as_tensor(theta, device=device, dtype=dtype)
+        if theta.numel() != num_angles:
+            raise ValueError("theta length must match sinogram angles dimension")
+        # Accept both degree and radian conventions.
+        if torch.max(torch.abs(theta)) > 2 * torch.pi + 1e-6:
+            theta = torch.deg2rad(theta)
 
     if output_size is None:
         output_size = num_detectors if circle else int(
@@ -105,123 +115,43 @@ def iradon(
 
     detector_x = torch.arange(num_detectors, device=device) - num_detectors // 2
 
-    # Backprojection 
-    for i in range(num_angles):
-        angle = theta[i]
-        t = ypr * torch.cos(angle) - xpr * torch.sin(angle)  # (H, W)
+    # Backprojection (parallel over all angles and all batches)
+    cos_t = torch.cos(theta).view(num_angles, 1, 1)
+    sin_t = torch.sin(theta).view(num_angles, 1, 1)
+    t = ypr.unsqueeze(0) * cos_t - xpr.unsqueeze(0) * sin_t  # (A, H, W)
 
-        # (N, D)
-        col = radon_filtered[:, :, i]
+    t_flat = t.reshape(num_angles, -1)  # (A, H*W)
+    idx = torch.searchsorted(detector_x, t_flat)
+    idx0 = torch.clamp(idx - 1, 0, num_detectors - 1)
+    idx1 = torch.clamp(idx, 0, num_detectors - 1)
 
-        # interp must support batch now
-        recon += interp1d_linear(t, detector_x, col)
+    x0 = detector_x[idx0]
+    x1 = detector_x[idx1]
+    denom = (x1 - x0)
+    denom = torch.where(denom == 0, torch.ones_like(denom), denom)
+    w = (t_flat - x0) / denom  # (A, H*W)
+
+    # (N, D, A) -> (N, A, D)
+    rf = radon_filtered.permute(0, 2, 1)
+    idx0_exp = idx0.unsqueeze(0).expand(N, -1, -1)
+    idx1_exp = idx1.unsqueeze(0).expand(N, -1, -1)
+
+    y0 = torch.gather(rf, 2, idx0_exp)
+    y1 = torch.gather(rf, 2, idx1_exp)
+
+    interp = y0 + (y1 - y0) * w.unsqueeze(0)  # (N, A, H*W)
+    recon = interp.sum(dim=1).view(N, output_size, output_size)
 
     # Circle mask
     if circle:
         mask = (xpr**2 + ypr**2) > radius**2
         recon[:, mask] = 0.0
 
-    return recon * math.pi / num_angles
+    recon = recon * math.pi / num_angles
+    recon = recon.view(*leading_shape, output_size, output_size)
 
-class FBPReconstructor(torch.nn.Module):
+    if squeeze_batch:
+        return recon.squeeze(0)
 
-    def __init__(
-            self,
-            n_angles=300,
-            scanner_radius_mm=300,
-            voxel_size_mm=2.0,
-            image_size=(160,160),
-            device=None
-    ):
-        super(FBPReconstructor, self).__init__()
-        self.n_angles = n_angles
-        self.scanner_radius_mm = scanner_radius_mm
-        self.voxel_size_mm = voxel_size_mm
-        if not isinstance(self.voxel_size_mm, (list, tuple)):
-            self.voxel_size_mm = [self.voxel_size_mm] * 2
-        self.image_size = image_size
-        #
-        if device is not None:
-            self.to(device)
-
-    def get_iradon_operator(self, sino):
-        #
-        self.theta = torch.linspace(0., 180., self.n_angles, dtype=sino.dtype, device=sino.device)
-        self.in_size = max(sino.shape[-2], sino.shape[-1]) # We take max as image is to be padded to square if not already
-        self.out_size = int(self.scanner_radius_mm * math.sqrt(2) / max(self.voxel_size_mm))
-        self.iradon = DeepInvIRadon(
-            in_size=self.in_size,
-            out_size=self.out_size,
-            theta=self.theta,
-            circle=True,
-            device=sino.device,
-            use_filter=True,
-            parallel_computation=True
-        )
-        
-    def forward(self, sinogram):
-        # Pad sinogram if not square
-        if sinogram.shape[-1] != sinogram.shape[-2]:
-            max_side = max(sinogram.shape[-1], sinogram.shape[-2])
-            pad_y = (max_side - sinogram.shape[-2]) // 2
-            pad_x = (max_side - sinogram.shape[-1]) // 2
-            sinogram = torch.nn.functional.pad(
-                sinogram, (pad_x, pad_x, pad_y, pad_y), mode='constant', value=0
-            )
-        #
-        if not hasattr(self, 'iradon') or self.in_size != sinogram.shape[-1]:
-            self.get_iradon_operator(sinogram)
-        #
-        image = self.iradon.forward(sinogram)
-        # Crop back to original size if padded
-        if image.shape[-1] != self.image_size[-1] or image.shape[-2] != self.image_size[-2]:
-            crop_x = (image.shape[-1] - self.image_size[-1]) // 2
-            crop_y = (image.shape[-2] - self.image_size[-2]) // 2
-            image = image[:, :, crop_y:crop_y+self.image_size[-2], crop_x:crop_x+self.image_size[-1]]
-        #
-        return image
-
-if __name__ == "__main__":
-
-    from tools.image.castor import read_castor_binary_file
-    # import matplotlib.pyplot as plt
-
-    # sino = read_castor_binary_file("/workspace/data/brain_web_phantom/simu/simu_pt.s.hdr").squeeze().transpose()
-    # sino = torch.from_numpy(sino)  # [1, A, D]
-    # angles = torch.linspace(0, math.pi, 300, device=sino.device)
-
-    # recon = iradon_torch(sino, angles, out_size=160, circle=False)
-    # plt.imshow(recon.cpu(), cmap="gray")
-    # plt.show()
-
-
-    from skimage.transform import radon, iradon as skimage_iradon
-    import numpy as np
-
-    import matplotlib.pyplot as plt
-
-    img = read_castor_binary_file("/workspace/data/brain_web_phantom/object/gt_web_after_scaling.hdr").squeeze()
-
-    theta = np.linspace(0, 180, 180, endpoint=False)
-    sino = radon(img.copy(), theta=theta, circle=True)
-
-    recon_np = skimage_iradon(sino, theta=theta, circle=True)
-    #
-    sino_tensor = torch.from_numpy(sino).float().unsqueeze(0) # shape (1, D, A)
-    recon_torch = iradon(sino_tensor).cpu().numpy()
-
-    sino_tensor = sino_tensor.unsqueeze(1) # shape (1, 1, D, A)
-    recon_torch_deepinv = deepinv_iradon(sino_tensor).cpu().numpy().squeeze()
-
-    print(np.mean(np.abs(recon_np - recon_torch.squeeze())))
-
-    fig, ax = plt.subplots(1,4)
-    ax[0].imshow(img, cmap='gray')
-    ax[0].set_title('Original Image')
-    ax[1].imshow(recon_np, cmap='gray')
-    ax[1].set_title('Reconstructed Image (skimage)')
-    ax[2].imshow(recon_torch.squeeze(), cmap='gray')
-    ax[2].set_title('Reconstructed Image (PyTorch)')
-    ax[3].imshow(recon_torch_deepinv, cmap='gray')
-    ax[3].set_title('Reconstructed Image (DeepInv)')
-    plt.show()
+    # Crop back to original size 
+    return recon
