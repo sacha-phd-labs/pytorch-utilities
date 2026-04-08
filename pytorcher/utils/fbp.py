@@ -1,7 +1,5 @@
 import torch, math
 
-from deepinv.physics.functional import IRadon as DeepInvIRadon
-
 def get_fourier_filter(size, filter_name, device):
     freqs = torch.fft.fftfreq(size, device=device).abs()
 
