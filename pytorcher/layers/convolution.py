@@ -101,12 +101,14 @@ class SinogramSeparableConv2d(nn.Module):
 class DoubleConv(nn.Module):
     """(convolution => [BN] => ReLU) * 2"""
 
-    def __init__(self, in_channels, out_channels, mid_channels=None, layer_type='Conv2d', residual=False, init='none', **kwargs):
+    def __init__(self, in_channels, out_channels, mid_channels=None, layer_type='Conv2d', residual=False, init='none', dropout=0.0, **kwargs):
         super().__init__()
         if not mid_channels:
             mid_channels = out_channels
         assert layer_type in globals().keys(), f"Layer type '{layer_type}' is not recognized."
         conv_layer = globals()[layer_type]
+
+        self.dropout = nn.Dropout2d(dropout) if dropout > 0.0 else nn.Identity()
         
         self.residual = residual
         conv1 = conv_layer(in_channels, mid_channels, kernel_size=3, padding=1, bias=False, **kwargs)
@@ -125,6 +127,7 @@ class DoubleConv(nn.Module):
         self.double_conv = nn.Sequential(
             conv1,
             nn.LeakyReLU(inplace=True),
+            self.dropout,
             conv2,
         )
         self.act = nn.LeakyReLU(inplace=True)
@@ -145,17 +148,18 @@ class DoubleConv(nn.Module):
         else:
             x = self.double_conv(x)
         x = self.act(x)
+        x = self.dropout(x)
         return x
 
     
 class Down(nn.Module):
     """Downscaling with maxpool then double conv"""
 
-    def __init__(self, in_channels, out_channels, layer_type='Conv2d', residual=False, init='dirac', **kwargs):
+    def __init__(self, in_channels, out_channels, layer_type='Conv2d', residual=False, init='dirac', dropout=0.0, **kwargs):
         super().__init__()
         self.maxpool_conv = nn.Sequential(
             nn.MaxPool2d(2),
-            DoubleConv(in_channels, out_channels, layer_type=layer_type, residual=residual, init=init, **kwargs)
+            DoubleConv(in_channels, out_channels, layer_type=layer_type, residual=residual, init=init, dropout=dropout, **kwargs)
         )
 
     def forward(self, x):
@@ -164,13 +168,13 @@ class Down(nn.Module):
 class ResizeConv(nn.Module):
     """Interpolation followed by convolution for image-to-image translation."""
     
-    def __init__(self, in_channels, scale_factor=2, mode='bilinear', layer_type='Conv2d', residual=False, init='dirac', **kwargs):
+    def __init__(self, in_channels, scale_factor=2, mode='bilinear', layer_type='Conv2d', residual=False, init='dirac', dropout=0.0, **kwargs):
         super().__init__()
         self.scale_factor = scale_factor
         self.mode = mode
         self.convs = nn.Sequential(
-            DoubleConv(in_channels, in_channels * 2, layer_type=layer_type, residual=False, init=init, **kwargs),
-            DoubleConv(in_channels * 2, in_channels, layer_type=layer_type, residual=residual, init=init, **kwargs),
+            DoubleConv(in_channels, in_channels * 2, layer_type=layer_type, residual=False, init=init, dropout=dropout, **kwargs),
+            DoubleConv(in_channels * 2, in_channels, layer_type=layer_type, residual=residual, init=init, dropout=dropout, **kwargs),
         )
 
     def forward(self, x):
@@ -181,16 +185,16 @@ class ResizeConv(nn.Module):
 class Up(nn.Module):
     """Upscaling then double conv"""
 
-    def __init__(self, in_channels, out_channels, bilinear=True, layer_type='Conv2d', residual=False, init='dirac', **kwargs):
+    def __init__(self, in_channels, out_channels, bilinear=True, layer_type='Conv2d', residual=False, init='dirac', dropout=0.0, **kwargs):
         super().__init__()
 
         # if bilinear, use the normal convolutions to reduce the number of channels
         if bilinear:
             self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
-            self.conv = DoubleConv(in_channels, out_channels, in_channels // 2, layer_type=layer_type, residual=residual, init=init, **kwargs)
+            self.conv = DoubleConv(in_channels, out_channels, in_channels // 2, layer_type=layer_type, residual=residual, init=init, dropout=dropout, **kwargs)
         else:
             self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
-            self.conv = DoubleConv(in_channels, out_channels, layer_type=layer_type, residual=residual, init=init, **kwargs)
+            self.conv = DoubleConv(in_channels, out_channels, layer_type=layer_type, residual=residual, init=init, dropout=dropout, **kwargs)
 
     def forward(self, x1, x2):
         x1 = self.up(x1)
