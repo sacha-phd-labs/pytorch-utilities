@@ -33,7 +33,7 @@ class PetForwardRadon(torch.nn.Module):
         self.radon = Radon(
             resolution=image.shape[-1],
             angles=self.theta,
-            clip_to_circle=False,
+            clip_to_circle=True,
             det_count=image.shape[-1],
             det_spacing=1.0
         )
@@ -47,12 +47,12 @@ class PetForwardRadon(torch.nn.Module):
     def pad_(self, img):
         # Pad img to fit in scanner radius
         img_size = torch.tensor(img.shape).max()
-        if torch.sqrt(torch.tensor(2.0)) * self.scanner_radius_mm >= img_size * max(self.voxel_size_mm):
+        if 2.0 * self.scanner_radius_mm >= img_size * max(self.voxel_size_mm):
             pad_x = int(
-                (torch.sqrt(torch.tensor(2.0)) * self.scanner_radius_mm - img.shape[-2] * self.voxel_size_mm[0]) / (2 * self.voxel_size_mm[0])
+                (2.0 * self.scanner_radius_mm - img.shape[-2] * self.voxel_size_mm[0]) / (2 * self.voxel_size_mm[0])
             )
             pad_y = int(
-                (torch.sqrt(torch.tensor(2.0)) * self.scanner_radius_mm - img.shape[-1] * self.voxel_size_mm[1]) / (2 * self.voxel_size_mm[1])
+                (2.0 * self.scanner_radius_mm - img.shape[-1] * self.voxel_size_mm[1]) / (2 * self.voxel_size_mm[1])
             )
             img = torch.nn.functional.pad(
                 img, (pad_x, pad_x, pad_y, pad_y), mode='constant', value=0
@@ -126,9 +126,9 @@ if __name__ == "__main__":
 
     from pytorcher.utils.fbp import iradon
 
-    image = torch.zeros((2, 16, 128, 128), device=device)
-    image[:, :, 32:96, 32:96] = 10.0
-    attenuation_map = torch.zeros((2, 16, 128, 128), device=device)
+    image = torch.ones((2, 16, 160, 160), device=device)
+    # image[:, :, 32:96, 32:96] = 10.0
+    attenuation_map = torch.zeros((2, 16, 160, 160), device=device)
 
     scanner_radius_mm = 300
     voxel_size_mm = 2.0
@@ -141,6 +141,8 @@ if __name__ == "__main__":
     )
 
     sinogram = pet_forward.forward(image, attenuation_map=attenuation_map, scale=0.02)
+
+    print(sinogram.sum())
 
     sinogram = torch.poisson(sinogram)
 
