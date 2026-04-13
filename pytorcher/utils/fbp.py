@@ -153,3 +153,32 @@ def iradon(
 
     # Crop back to original size 
     return recon
+
+if __name__ == "__main__":
+            
+    from tools.image.castor import read_castor_binary_file
+    import os
+
+    path=os.path.join(os.getenv('WORKSPACE'), 'data/brain_web_phantom')
+
+    simu_dest_path = os.path.join(path, 'simu')
+
+
+    scatter = read_castor_binary_file(os.path.join(simu_dest_path, 'simu',  'simu_sc.s.hdr')).squeeze()
+    random = read_castor_binary_file(os.path.join(simu_dest_path, 'simu', 'simu_rd.s.hdr')).squeeze()
+    nf_prompt = read_castor_binary_file(os.path.join(simu_dest_path, 'simu', 'simu_nfpt.s.hdr')).squeeze()
+    prompt, meta = read_castor_binary_file(os.path.join(simu_dest_path, 'simu', 'simu_pt.s.hdr'), return_metadata=True)
+    prompt = prompt.squeeze()
+    scale = float(meta['scale_factor'])
+    true_sino = read_castor_binary_file(os.path.join(simu_dest_path, 'simu', 'simu_t.s.hdr')).squeeze()
+
+    scatter = torch.from_numpy(scatter)
+    random = torch.from_numpy(random)
+    prompt = torch.from_numpy(prompt)
+    true_sino = torch.from_numpy(true_sino)
+
+    recon_true = iradon(true_sino / scale, theta=torch.linspace(0, torch.pi, 300), circle=True)
+    recon_prompt = iradon((prompt - scatter - random) / scale, theta=torch.linspace(0, torch.pi, 300), circle=True)
+
+    print("True recon max:", recon_true.max())
+    print("Prompt recon max:", recon_prompt.max())
