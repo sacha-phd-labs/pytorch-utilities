@@ -105,9 +105,9 @@ class PetForwardRadon(torch.nn.Module):
         if self.gaussian_PSF_fwhm_mm is not None: 
             sigma_mm = self.gaussian_PSF_fwhm_mm / (4.0 * (torch.log(torch.tensor(2.0)))**0.5)
             # 1D sigma in sinogram domain on each row
-            bin_widths_mm = torch.abs(self.voxel_size_mm[0] * torch.cos(self.theta * torch.pi / 180.0)) + torch.abs(self.voxel_size_mm[1] * torch.sin(self.theta * torch.pi / 180.0))
+            bin_widths_mm = self.voxel_size_mm[0] #torch.abs(self.voxel_size_mm[0] * torch.cos(self.theta * torch.pi / 180.0)) + torch.abs(self.voxel_size_mm[1] * torch.sin(self.theta * torch.pi / 180.0))
             sigma_sino_mm = sigma_mm / bin_widths_mm
-            sinogram = apply_columnwise_gaussian_psf(sinogram, sigmas=sigma_sino_mm)
+            sinogram = apply_columnwise_gaussian_psf(sinogram, sigma=sigma_sino_mm)
 
         # Scale sinogram to match expected counts
         if scale is not None:
