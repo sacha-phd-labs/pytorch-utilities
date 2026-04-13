@@ -125,10 +125,18 @@ if __name__ == "__main__":
     device = torch.device('cuda')
 
     from pytorcher.utils.fbp import iradon
+    from tools.image.castor import read_castor_binary_file
+    import os
 
-    image = torch.ones((2, 16, 160, 160), device=device)
-    # image[:, :, 32:96, 32:96] = 10.0
-    attenuation_map = torch.zeros((2, 16, 160, 160), device=device)
+    path=os.path.join(os.getenv('WORKSPACE'), 'data/brain_web_phantom')
+    image_path = os.path.join(path, 'object', 'gt_web_after_scaling.hdr')
+    att_path = os.path.join(path, 'object', 'attenuat_brain_phantom.hdr')
+
+    image = read_castor_binary_file(image_path)
+    attenuation_map = read_castor_binary_file(att_path)
+
+    image = torch.from_numpy(image).unsqueeze(0).float().to(device)
+    attenuation_map = torch.from_numpy(attenuation_map).unsqueeze(0).float().to(device)
 
     scanner_radius_mm = 300
     voxel_size_mm = 2.0
@@ -140,13 +148,13 @@ if __name__ == "__main__":
         voxel_size_mm=voxel_size_mm
     )
 
-    sinogram = pet_forward.forward(image, attenuation_map=attenuation_map, scale=0.02)
+    scale = 0.003697873093187809
+    sinogram = pet_forward.forward(image, attenuation_map=attenuation_map, scale=scale)
 
     print(sinogram.sum())
 
     sinogram = torch.poisson(sinogram)
-
-    recon = iradon(sinogram, theta=pet_forward.theta.cpu().numpy(), output_size=image.shape[-1], filter='ramp', circle=False)
+    recon = iradon(sinogram / scale, theta=pet_forward.theta.cpu().numpy(), output_size=image.shape[-1], filter='ramp', circle=False)
 
     import matplotlib.pyplot as plt
 
