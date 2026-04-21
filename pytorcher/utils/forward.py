@@ -51,8 +51,8 @@ class PetForwardRadon(torch.nn.Module):
         self.to(torch.device('cuda'))
         #
 
-    def get_radon_operator(self, in_size, dtype, device):
-        self.theta = torch.linspace(0., np.pi, self.n_angles, dtype=dtype, device=device)
+    def get_radon_operator(self, in_size):
+        self.theta = np.linspace(0., 180., self.n_angles, endpoint=False) * (np.pi / 180.0)
         self.in_size = in_size
         self.radon = Radon(
             resolution=in_size,
@@ -64,7 +64,7 @@ class PetForwardRadon(torch.nn.Module):
 
     def radon_forward(self, image):
         if not hasattr(self, 'radon') or self.in_size != image.shape[-1]:
-            self.get_radon_operator(image.shape[-1], image.dtype, image.device)
+            self.get_radon_operator(image.shape[-1])
         out = self.radon.forward(image)
         return out.transpose(-2, -1)
 
@@ -118,7 +118,7 @@ class PetForwardRadon(torch.nn.Module):
         num_angles = sinogram.shape[-1]
         sino_resolution = sinogram.shape[-2]
         if not hasattr(self, 'radon') or self.in_size != sino_resolution:
-            self.get_radon_operator(sino_resolution, sinogram.dtype, sinogram.device)
+            self.get_radon_operator(sino_resolution)
 
         if scale is not None:
             if not isinstance(scale, torch.Tensor):
@@ -190,7 +190,7 @@ class PetForwardRadon(torch.nn.Module):
 
         # Radon transform
         if not hasattr(self, 'radon') or self.in_size != image.shape[-1]:
-            self.get_radon_operator(image.shape[-1], image.dtype, image.device)
+            self.get_radon_operator(image.shape[-1])
         sinogram = self.radon_forward(image)
 
         # Apply attenuation if provided
@@ -253,7 +253,7 @@ if __name__ == "__main__":
     true_sino = read_castor_binary_file(os.path.join(simu_dest_path, 'simu', 'simu_t.s.hdr')).squeeze()
     true_sino = torch.from_numpy(true_sino).float().to(device).unsqueeze(0).unsqueeze(0)
 
-    scanner_radius_mm = 300
+    scanner_radius_mm = 320
     voxel_size_mm = 2.0
 
     pet_forward = PetForwardRadon(
@@ -280,7 +280,7 @@ if __name__ == "__main__":
     ax[1].imshow(np.abs(sinogram[0, 0, ...].cpu().squeeze() - true_sino.cpu().squeeze()), cmap='gray')
     ax[1].set_title('Difference between Forward Projection and True Sinogram')
 
-    ax[2].imshow(back_projection[0, 0, ...].cpu().squeeze(), cmap='gray_r')
+    ax[2].imshow(np.log(back_projection[0, 0, ...].cpu().squeeze()), cmap='gray_r')
     ax[2].set_title('Back Projection')
 
     plt.show()
