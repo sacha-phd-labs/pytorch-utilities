@@ -151,13 +151,10 @@ class PetSystem(torch.nn.Module):
 
         if sino.ndim == 4 and self.projector_type == 'parallelproj_parallel':
             sino = sino.squeeze(1) # remove channel dimension if exists
-            out = self.proj.adjoint(sino) / self.proj.adjoint(torch.ones_like(sino)) # apply sensitivity correction
+            out = self.proj.adjoint(sino, scale=scale) / self.proj.adjoint(torch.ones_like(sino), scale=None) # apply sensitivity correction
             out = out.unsqueeze(1) # add channel dimension back
         else:
             raise ValueError(f"Unknown combination of projector type and sinogram dimensions: {self.projector_type} with sino.ndim={sino.ndim}")
-        
-        if scale is not None:
-            out = out / scale
 
         return out
 
