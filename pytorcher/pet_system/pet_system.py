@@ -40,42 +40,6 @@ class PetProjection(torch.autograd.Function):
             raise ValueError(f"Unknown combination of projector type and grad_output dimensions: {type(projector)} with grad_output.ndim={grad_output_detached.ndim}")
 
         return out, None, None
-    
-class PetAdjoint(torch.autograd.Function):
-
-    @staticmethod
-    def forward(ctx, sino, projector):
-
-        ctx.projector = projector
-
-        sino_detached = sino.detach()
-
-        if sino_detached.ndim == 4 and isinstance(projector, ParallelViewProjector2D):
-            sino_detached = sino_detached.squeeze(1) # remove channel dimension if exists
-            out = projector.adjoint(sino_detached)
-            out = out.unsqueeze(1) # add channel dimension back
-        else:
-            raise ValueError(f"Unknown combination of projector type and sinogram dimensions: {type(projector)} with sino.ndim={sino_detached.ndim}")
-        return out
-    
-    @staticmethod
-    def backward(ctx, grad_output):
-
-        projector = ctx.projector
-        filter_name = ctx.filter_name
-        scale = ctx.scale
-
-        grad_output_detached = grad_output.detach()
-
-        if grad_output_detached.ndim == 4 and isinstance(projector, ParallelViewProjector2D):
-            grad_output_detached = grad_output_detached.squeeze(1) # remove channel dimension if exists
-            out = projector.project(grad_output_detached, scale=scale)
-            out = PetSystem.filter_sinogram(out, filter_name=filter_name) # apply same filter as in forward pass to ensure consistency of adjoint operation
-            out = out.unsqueeze(1) # add channel dimension back
-        else:
-            raise ValueError(f"Unknown combination of projector type and grad_output dimensions: {type(projector)} with grad_output.ndim={grad_output_detached.ndim}")
-
-        return out, None, None, None
 
 class PetSystem(torch.nn.Module):
 
@@ -158,9 +122,71 @@ class PetSystem(torch.nn.Module):
 
         return sinogram
 
-    def adjoint(self, sinogram):
+    @staticmethod
+    def filter_sinogram(sinogram, filter_name="ramp"):
 
-        return PetAdjoint.apply(sinogram, self.proj)
+        def get_fourier_filter( size, filter_name, device, dtype=torch.float32):
+            freqs = ( 2 * torch.fft.fftfreq(size, device=device).abs()).to(dtype)
+
+            if filter_name == "ramp":
+                filt = freqs
+            elif filter_name == "shepp-logan":
+                filt = freqs * torch.sinc(freqs / 2)
+            elif filter_name == "cosine":
+                filt = freqs * torch.cos(math.pi * freqs / 2)
+            elif filter_name == "hamming":
+                filt = freqs * (0.54 + 0.46 * torch.cos(math.pi * freqs))
+            elif filter_name == "hann":
+                filt = freqs * (1 + torch.cos(math.pi * freqs)) / 2
+            elif filter_name is None:
+                filt = torch.ones_like(freqs)
+            else:
+                raise ValueError("Unknown filter")
+
+            return filt[:, None]  # column-wise
+
+        if sinogram.ndim < 2:
+            raise ValueError("sinogram must be (..., detectors, angles)")
+
+        leading_shape = sinogram.shape[:-2]
+        num_detectors = sinogram.shape[-2]
+        num_angles = sinogram.shape[-1]
+        device = sinogram.device
+        dtype = sinogram.dtype
+
+        # Flatten leading dims to apply one FFT per sinogram
+        sinogram = sinogram.reshape(-1, num_detectors, num_angles)
+
+        # Padding
+        padded_size = max(64, 2 ** math.ceil(math.log2(2 * num_detectors)))
+        pad = padded_size - num_detectors
+        img = torch.nn.functional.pad(sinogram, (0, 0, 0, pad))  # (Nflat, padded, A)
+
+        # Fourier filtering
+        fourier_filter = get_fourier_filter(padded_size, filter_name, device, dtype=dtype)  # (padded, 1)
+        proj_fft = torch.fft.fft(img, dim=1) * fourier_filter.unsqueeze(0)  # broadcast over Nflat
+        radon_filtered = torch.real(torch.fft.ifft(proj_fft, dim=1))[:, :num_detectors]
+
+        return radon_filtered.reshape(*leading_shape, num_detectors, num_angles)
+    
+    def forward_adjoint(self, sinogram, attenuation_map=None, scale=None):
+        with torch.enable_grad():
+            x_0 = torch.zeros((sinogram.shape[0], sinogram.shape[1], self.proj.img_shape[0], self.proj.img_shape[1]), device=sinogram.device, requires_grad=True)
+            Ax_0 = self.forward(x_0, attenuation_map=attenuation_map, scale=scale)
+            prod_Ax_y = (Ax_0 * sinogram).sum()
+            grad_Ax = torch.autograd.grad(prod_Ax_y, x_0)[0]
+        return grad_Ax
+    
+    def fbp(self, sinogram, filter_name='ramp', attenuation_map=None, scale=None):
+
+        # filter sinogram
+        sinogram = self.filter_sinogram(sinogram, filter_name=filter_name)
+
+        # backproject
+        sensitivity = self.forward_adjoint(torch.ones_like(sinogram), attenuation_map=attenuation_map, scale=None)
+        reconstructed_image = self.forward_adjoint(sinogram, attenuation_map=attenuation_map, scale=scale) / sensitivity
+
+        return reconstructed_image
 
 if __name__ == "__main__":
 
@@ -184,8 +210,12 @@ if __name__ == "__main__":
     path=os.path.join(os.getenv('WORKSPACE'), 'data/brain_web_phantom')
     simu_dest_path = os.path.join(path, 'simu')
 
-    _, meta = read_castor_binary_file(os.path.join(simu_dest_path, 'simu', 'simu_pt.s.hdr'), return_metadata=True)
+    prompt, meta = read_castor_binary_file(os.path.join(simu_dest_path, 'simu', 'simu_pt.s.hdr'), return_metadata=True)
+    nfpt = read_castor_binary_file(os.path.join(simu_dest_path, 'simu', 'simu_nfpt.s.hdr')).squeeze()
     scale = float(meta['scale_factor'])
+
+    prompt = torch.from_numpy(prompt).unsqueeze(0).float().to(device)
+    nfpt = torch.from_numpy(nfpt).unsqueeze(0).float().to(device)
 
     system = PetSystem(
         projector_type='parallelproj_parallel',
@@ -203,7 +233,7 @@ if __name__ == "__main__":
 
     sinogram = torch.poisson(sinogram) # add Poisson noise to simulate realistic PET data
 
-    bp = system.adjoint(sinogram)
+    bp = system.fbp(sinogram, filter_name='ramp', attenuation_map=attenuation_map, scale=scale)
 
     fig, ax = plt.subplots(1, 2, figsize=(10, 5))
     ax[0].imshow(sinogram.cpu().squeeze(), cmap='gray')
