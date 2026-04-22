@@ -4,15 +4,88 @@ from pytorcher.utils.filters import apply_gaussian_psf_reflect, apply_columnwise
 
 from pet_simulator import ParallelViewProjector2D
 
+class PetProjection(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, image, projector, scale=None):
+
+        ctx.projector = projector
+        ctx.scale = scale
+
+        img_detached = image.detach()
+
+        if img_detached.ndim == 4 and isinstance(projector, ParallelViewProjector2D):
+            img_detached = img_detached.squeeze(1) # remove channel dimension if exists
+            out = projector.project(img_detached, scale=scale)
+            out = out.unsqueeze(1) # add channel dimension back
+        else:
+            out = projector.project(img_detached, scale=scale)
+
+        return out
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+
+        projector = ctx.projector
+        scale = ctx.scale
+
+        grad_output_detached = grad_output.detach()
+
+        if grad_output_detached.ndim == 4 and isinstance(projector, ParallelViewProjector2D):
+            grad_output_detached = grad_output_detached.squeeze(1) # remove channel dimension if exists
+            out = projector.adjoint(grad_output_detached, scale=scale)
+            out = out.unsqueeze(1) # add channel dimension back
+        else:
+            raise ValueError(f"Unknown combination of projector type and grad_output dimensions: {type(projector)} with grad_output.ndim={grad_output_detached.ndim}")
+
+        return out, None, None
+    
+class PetAdjoint(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, sino, projector, filter_name="ramp", scale=None):
+
+        ctx.projector = projector
+        ctx.filter_name = filter_name
+        ctx.scale = scale
+
+        sino_detached = sino.detach()
+
+        sino_detached = PetSystem.filter_sinogram(sino_detached, filter_name=filter_name)
+
+        if sino_detached.ndim == 4 and isinstance(projector, ParallelViewProjector2D):
+            sino_detached = sino_detached.squeeze(1) # remove channel dimension if exists
+            out = projector.adjoint(sino_detached, scale=scale)
+            out = out.unsqueeze(1) # add channel dimension back
+        else:
+            raise ValueError(f"Unknown combination of projector type and sinogram dimensions: {type(projector)} with sino.ndim={sino_detached.ndim}")
+        return out
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+
+        projector = ctx.projector
+        filter_name = ctx.filter_name
+        scale = ctx.scale
+
+        grad_output_detached = grad_output.detach()
+
+        if grad_output_detached.ndim == 4 and isinstance(projector, ParallelViewProjector2D):
+            grad_output_detached = grad_output_detached.squeeze(1) # remove channel dimension if exists
+            out = projector.project(grad_output_detached, scale=scale)
+            out = PetSystem.filter_sinogram(out, filter_name=filter_name) # apply same filter as in forward pass to ensure consistency of adjoint operation
+            out = out.unsqueeze(1) # add channel dimension back
+        else:
+            raise ValueError(f"Unknown combination of projector type and grad_output dimensions: {type(projector)} with grad_output.ndim={grad_output_detached.ndim}")
+
+        return out, None, None, None
+
 class PetSystem(torch.nn.Module):
 
     def __init__(
             self,
             projector_type='parallelproj_parallel',
             projector_config={},
-            scatter_component=0.36,
-            scatter_sigma=4.0, # in pixels
-            random_component=0.50,
             gaussian_PSF=4.0,
             device='cuda'
         ):
@@ -21,7 +94,6 @@ class PetSystem(torch.nn.Module):
         projector_config['array_compat'] = 'torch'
 
         self.device = device
-        self.to(device)
         
         self.projector_config = projector_config
         self.projector_type = projector_type
@@ -29,9 +101,6 @@ class PetSystem(torch.nn.Module):
 
         self.voxel_size_mm = projector_config.get('voxel_size_mm', None)
 
-        self.scatter_component = scatter_component
-        self.scatter_sigma = scatter_sigma
-        self.random_component = random_component
         self.gaussian_PSF_fwhm_mm = gaussian_PSF
 
 
@@ -44,16 +113,9 @@ class PetSystem(torch.nn.Module):
         
         self.proj.dev = self.device
 
-    def project(self, img, scale=None):
+    def project(self, image, scale=None):
 
-        if img.ndim == 4 and self.projector_type == 'parallelproj_parallel':
-            img = img.squeeze(1) # remove channel dimension if exists
-            out = self.proj.project(img, scale=scale)
-            out = out.unsqueeze(1) # add channel dimension back
-        else:
-            out = self.proj.project(img, scale=scale)
-
-        return out
+        return PetProjection.apply(image, self.proj, scale)
     
     def forward(self, image, attenuation_map=None, scale=None):
 
@@ -99,27 +161,29 @@ class PetSystem(torch.nn.Module):
 
         return sinogram
     
-    def get_fourier_filter(self, size, filter_name, device, dtype=torch.float32):
-        freqs = ( 2 * torch.fft.fftfreq(size, device=device).abs()).to(dtype)
 
-        if filter_name == "ramp":
-            filt = freqs
-        elif filter_name == "shepp-logan":
-            filt = freqs * torch.sinc(freqs / 2)
-        elif filter_name == "cosine":
-            filt = freqs * torch.cos(math.pi * freqs / 2)
-        elif filter_name == "hamming":
-            filt = freqs * (0.54 + 0.46 * torch.cos(math.pi * freqs))
-        elif filter_name == "hann":
-            filt = freqs * (1 + torch.cos(math.pi * freqs)) / 2
-        elif filter_name is None:
-            filt = torch.ones_like(freqs)
-        else:
-            raise ValueError("Unknown filter")
+    @staticmethod
+    def filter_sinogram(sinogram, filter_name="ramp"):
 
-        return filt[:, None]  # column-wise
+        def get_fourier_filter( size, filter_name, device, dtype=torch.float32):
+            freqs = ( 2 * torch.fft.fftfreq(size, device=device).abs()).to(dtype)
 
-    def filter_sinogram(self, sinogram, filter_name="ramp"):
+            if filter_name == "ramp":
+                filt = freqs
+            elif filter_name == "shepp-logan":
+                filt = freqs * torch.sinc(freqs / 2)
+            elif filter_name == "cosine":
+                filt = freqs * torch.cos(math.pi * freqs / 2)
+            elif filter_name == "hamming":
+                filt = freqs * (0.54 + 0.46 * torch.cos(math.pi * freqs))
+            elif filter_name == "hann":
+                filt = freqs * (1 + torch.cos(math.pi * freqs)) / 2
+            elif filter_name is None:
+                filt = torch.ones_like(freqs)
+            else:
+                raise ValueError("Unknown filter")
+
+            return filt[:, None]  # column-wise
 
         if sinogram.ndim < 2:
             raise ValueError("sinogram must be (..., detectors, angles)")
@@ -139,24 +203,15 @@ class PetSystem(torch.nn.Module):
         img = torch.nn.functional.pad(sinogram, (0, 0, 0, pad))  # (Nflat, padded, A)
 
         # Fourier filtering
-        fourier_filter = self.get_fourier_filter(padded_size, filter_name, device, dtype=dtype)  # (padded, 1)
+        fourier_filter = get_fourier_filter(padded_size, filter_name, device, dtype=dtype)  # (padded, 1)
         proj_fft = torch.fft.fft(img, dim=1) * fourier_filter.unsqueeze(0)  # broadcast over Nflat
         radon_filtered = torch.real(torch.fft.ifft(proj_fft, dim=1))[:, :num_detectors]
 
         return radon_filtered.reshape(*leading_shape, num_detectors, num_angles)
 
-    def adjoint(self, sino, filter_name="ramp", scale=None):
+    def adjoint(self, sinogram, scale=None, filter_name="ramp"):
 
-        sino = self.filter_sinogram(sino, filter_name=filter_name)
-
-        if sino.ndim == 4 and self.projector_type == 'parallelproj_parallel':
-            sino = sino.squeeze(1) # remove channel dimension if exists
-            out = self.proj.adjoint(sino, scale=scale) / self.proj.adjoint(torch.ones_like(sino), scale=None) # apply sensitivity correction
-            out = out.unsqueeze(1) # add channel dimension back
-        else:
-            raise ValueError(f"Unknown combination of projector type and sinogram dimensions: {self.projector_type} with sino.ndim={sino.ndim}")
-
-        return out
+        return PetAdjoint.apply(sinogram, self.proj, filter_name, scale)
 
 if __name__ == "__main__":
 
