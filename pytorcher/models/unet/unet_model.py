@@ -89,7 +89,7 @@ class UNet(nn.Module):
         in_out_ratio = (dummy_output.shape[2] / dummy_input.shape[2], dummy_output.shape[3] / dummy_input.shape[3])
         return in_out_ratio
 
-    def forward(self, x, **kwargs):
+    def forward(self, x):
         x1 = self.inc(x)
         skip_connections = [x1, ]
         x_temp = x1
@@ -102,7 +102,7 @@ class UNet(nn.Module):
         #
         # SKIP CONNECTIONS
         for i, skip_connection in enumerate(skip_connections):
-            skip_connections[i] = self.compute_skip_connection(skip_connection, **kwargs)
+            skip_connections[i] = self.compute_skip_connection(skip_connection)
         #
         # DECODER
         for i, up in enumerate(self.ups):
