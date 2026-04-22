@@ -1,3 +1,4 @@
+import numpy
 import torch, math
 
 from pytorcher.utils.filters import apply_gaussian_psf_reflect, apply_columnwise_gaussian_psf
@@ -43,19 +44,15 @@ class PetProjection(torch.autograd.Function):
 class PetAdjoint(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, sino, projector, filter_name="ramp", scale=None):
+    def forward(ctx, sino, projector):
 
         ctx.projector = projector
-        ctx.filter_name = filter_name
-        ctx.scale = scale
 
         sino_detached = sino.detach()
 
-        sino_detached = PetSystem.filter_sinogram(sino_detached, filter_name=filter_name)
-
         if sino_detached.ndim == 4 and isinstance(projector, ParallelViewProjector2D):
             sino_detached = sino_detached.squeeze(1) # remove channel dimension if exists
-            out = projector.adjoint(sino_detached, scale=scale)
+            out = projector.adjoint(sino_detached)
             out = out.unsqueeze(1) # add channel dimension back
         else:
             raise ValueError(f"Unknown combination of projector type and sinogram dimensions: {type(projector)} with sino.ndim={sino_detached.ndim}")
@@ -160,58 +157,10 @@ class PetSystem(torch.nn.Module):
             sinogram = apply_columnwise_gaussian_psf(sinogram, sigma=sigma_sino_mm)
 
         return sinogram
-    
 
-    @staticmethod
-    def filter_sinogram(sinogram, filter_name="ramp"):
+    def adjoint(self, sinogram):
 
-        def get_fourier_filter( size, filter_name, device, dtype=torch.float32):
-            freqs = ( 2 * torch.fft.fftfreq(size, device=device).abs()).to(dtype)
-
-            if filter_name == "ramp":
-                filt = freqs
-            elif filter_name == "shepp-logan":
-                filt = freqs * torch.sinc(freqs / 2)
-            elif filter_name == "cosine":
-                filt = freqs * torch.cos(math.pi * freqs / 2)
-            elif filter_name == "hamming":
-                filt = freqs * (0.54 + 0.46 * torch.cos(math.pi * freqs))
-            elif filter_name == "hann":
-                filt = freqs * (1 + torch.cos(math.pi * freqs)) / 2
-            elif filter_name is None:
-                filt = torch.ones_like(freqs)
-            else:
-                raise ValueError("Unknown filter")
-
-            return filt[:, None]  # column-wise
-
-        if sinogram.ndim < 2:
-            raise ValueError("sinogram must be (..., detectors, angles)")
-
-        leading_shape = sinogram.shape[:-2]
-        num_detectors = sinogram.shape[-2]
-        num_angles = sinogram.shape[-1]
-        device = sinogram.device
-        dtype = sinogram.dtype
-
-        # Flatten leading dims to apply one FFT per sinogram
-        sinogram = sinogram.reshape(-1, num_detectors, num_angles)
-
-        # Padding
-        padded_size = max(64, 2 ** math.ceil(math.log2(2 * num_detectors)))
-        pad = padded_size - num_detectors
-        img = torch.nn.functional.pad(sinogram, (0, 0, 0, pad))  # (Nflat, padded, A)
-
-        # Fourier filtering
-        fourier_filter = get_fourier_filter(padded_size, filter_name, device, dtype=dtype)  # (padded, 1)
-        proj_fft = torch.fft.fft(img, dim=1) * fourier_filter.unsqueeze(0)  # broadcast over Nflat
-        radon_filtered = torch.real(torch.fft.ifft(proj_fft, dim=1))[:, :num_detectors]
-
-        return radon_filtered.reshape(*leading_shape, num_detectors, num_angles)
-
-    def adjoint(self, sinogram, scale=None, filter_name="ramp"):
-
-        return PetAdjoint.apply(sinogram, self.proj, filter_name, scale)
+        return PetAdjoint.apply(sinogram, self.proj)
 
 if __name__ == "__main__":
 
@@ -254,7 +203,7 @@ if __name__ == "__main__":
 
     sinogram = torch.poisson(sinogram) # add Poisson noise to simulate realistic PET data
 
-    bp = system.adjoint(sinogram, scale=scale, filter_name='ramp')
+    bp = system.adjoint(sinogram)
 
     fig, ax = plt.subplots(1, 2, figsize=(10, 5))
     ax[0].imshow(sinogram.cpu().squeeze(), cmap='gray')
