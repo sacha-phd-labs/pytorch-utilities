@@ -188,6 +188,26 @@ class PetSystem(torch.nn.Module):
 
         return reconstructed_image
 
+    def mlem(self, sinogram, num_it=10, attenuation_map=None, scale=None, corr=None, eps=1e-8):
+
+        if corr is None:
+            corr = torch.zeros_like(sinogram)
+
+        # Compute snesitivity
+        sensitivity = self.forward_adjoint(torch.ones_like(sinogram))
+
+        x_0 = torch.ones((sinogram.shape[0], sinogram.shape[1], self.proj.img_shape[0], self.proj.img_shape[1]), device=sinogram.device)
+
+        for _ in range(num_it):
+
+            # E-step
+            y_hat = self.forward(x_0, attenuation_map=attenuation_map, scale=scale) + corr
+
+            # M-step
+            x_0 = x_0 * self.forward_adjoint(sinogram / (y_hat + eps)) / sensitivity
+
+        return x_0
+
 if __name__ == "__main__":
 
     import matplotlib.pyplot as plt
@@ -211,11 +231,13 @@ if __name__ == "__main__":
     simu_dest_path = os.path.join(path, 'simu')
 
     prompt, meta = read_castor_binary_file(os.path.join(simu_dest_path, 'simu', 'simu_pt.s.hdr'), return_metadata=True)
-    nfpt = read_castor_binary_file(os.path.join(simu_dest_path, 'simu', 'simu_nfpt.s.hdr')).squeeze()
     scale = float(meta['scale_factor'])
+    random = read_castor_binary_file(os.path.join(simu_dest_path, 'simu', 'simu_rd.s.hdr'))
+    scatter = read_castor_binary_file(os.path.join(simu_dest_path, 'simu', 'simu_sc.s.hdr'))
+    corr = random + scatter
 
     prompt = torch.from_numpy(prompt).unsqueeze(0).float().to(device)
-    nfpt = torch.from_numpy(nfpt).unsqueeze(0).float().to(device)
+    corr = torch.from_numpy(corr).unsqueeze(0).float().to(device)
 
     system = PetSystem(
         projector_type='parallelproj_parallel',
@@ -235,9 +257,11 @@ if __name__ == "__main__":
 
     bp = system.fbp(sinogram, filter_name='ramp', attenuation_map=attenuation_map, scale=scale)
 
+    recon_mlem = system.mlem(prompt, attenuation_map=attenuation_map, scale=scale, corr=corr, num_it=10)
+
     fig, ax = plt.subplots(1, 2, figsize=(10, 5))
-    ax[0].imshow(sinogram.cpu().squeeze(), cmap='gray')
-    ax[0].set_title('Simulated Sinogram')
-    ax[1].imshow(bp.cpu().squeeze(), cmap='gray_r')
-    ax[1].set_title('Backprojected Image')
+    ax[0].imshow(prompt.cpu().squeeze(), cmap='gray')
+    ax[0].set_title('Prompt Sinogram')
+    ax[1].imshow(recon_mlem.cpu().squeeze(), cmap='gray_r')
+    ax[1].set_title('MLEM Image')
     plt.show()
