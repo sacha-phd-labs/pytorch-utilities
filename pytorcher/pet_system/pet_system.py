@@ -3,13 +3,15 @@ import torch, math
 
 from pytorcher.utils.filters import apply_gaussian_psf_reflect, apply_columnwise_gaussian_psf
 
+from pytorcher.utils.fbp import iradon
+
+
 from pet_simulator import ParallelViewProjector2D
 
 class PetProjection(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, image, projector, scale=None):
-
         ctx.projector = projector
         ctx.scale = scale
 
@@ -35,6 +37,41 @@ class PetProjection(torch.autograd.Function):
         if grad_output_detached.ndim == 4 and isinstance(projector, ParallelViewProjector2D):
             grad_output_detached = grad_output_detached.squeeze(1) # remove channel dimension if exists
             out = projector.adjoint(grad_output_detached, scale=scale)
+            out = out.unsqueeze(1) # add channel dimension back
+        else:
+            raise ValueError(f"Unknown combination of projector type and grad_output dimensions: {type(projector)} with grad_output.ndim={grad_output_detached.ndim}")
+
+        return out, None, None
+
+class PetBackward(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, sinogram, projector, scale=None):
+        ctx.projector = projector
+        ctx.scale = scale
+
+        sino_detached = sinogram.detach()
+
+        if sino_detached.ndim == 4 and isinstance(projector, ParallelViewProjector2D):
+            sino_detached = sino_detached.squeeze(1) # remove channel dimension if exists
+            out = projector.adjoint(sino_detached, scale=scale)
+            out = out.unsqueeze(1) # add channel dimension back
+        else:
+            raise ValueError(f"Unknown combination of projector type and sino dimensions: {type(projector)} with sino.ndim={sino_detached.ndim}")
+
+        return out
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+
+        projector = ctx.projector
+        scale = ctx.scale
+
+        grad_output_detached = grad_output.detach()
+
+        if grad_output_detached.ndim == 4 and isinstance(projector, ParallelViewProjector2D):
+            grad_output_detached = grad_output_detached.squeeze(1) # remove channel dimension if exists
+            out = projector.project(grad_output_detached, scale=scale)
             out = out.unsqueeze(1) # add channel dimension back
         else:
             raise ValueError(f"Unknown combination of projector type and grad_output dimensions: {type(projector)} with grad_output.ndim={grad_output_detached.ndim}")
@@ -77,6 +114,10 @@ class PetSystem(torch.nn.Module):
     def project(self, image, scale=None):
 
         return PetProjection.apply(image, self.proj, scale)
+    
+    def backward(self, sinogram, scale=None):
+
+        return PetBackward.apply(sinogram, self.proj, scale)
     
     def forward(self, image, attenuation_map=None, scale=None):
 
@@ -177,16 +218,24 @@ class PetSystem(torch.nn.Module):
             grad_Ax = torch.autograd.grad(prod_Ax_y, x_0)[0]
         return grad_Ax
     
-    def fbp(self, sinogram, filter_name='ramp', attenuation_map=None, scale=None):
+    def project_adjoint(self, sinogram, scale=None):
+        with torch.enable_grad():
+            x_0 = torch.zeros((sinogram.shape[0], sinogram.shape[1], self.proj.img_shape[0], self.proj.img_shape[1]), device=sinogram.device, requires_grad=True)
+            Ax_0 = self.project(x_0, scale=scale)
+            prod_Ax_y = (Ax_0 * sinogram).sum()
+            grad_Ax = torch.autograd.grad(prod_Ax_y, x_0)[0]
+        return grad_Ax
+    
+    def fbp(self, sinogram, filter_name='ramp', scale=None):
 
         # filter sinogram
         sinogram = self.filter_sinogram(sinogram, filter_name=filter_name)
 
         # backproject
-        sensitivity = self.forward_adjoint(torch.ones_like(sinogram), attenuation_map=attenuation_map, scale=None)
-        reconstructed_image = self.forward_adjoint(sinogram, attenuation_map=attenuation_map, scale=scale) / sensitivity
+        sensitivity = self.backward(torch.ones_like(sinogram), scale=None)
+        reconstructed_image = self.backward(sinogram, scale=scale) / sensitivity
 
-        return reconstructed_image
+        return reconstructed_image     
 
     def mlem(self, sinogram, num_it=10, attenuation_map=None, scale=None, corr=None, eps=1e-8):
 
@@ -217,7 +266,7 @@ if __name__ == "__main__":
     from tools.image.castor import read_castor_binary_file
     import os
 
-    path=os.path.join(os.getenv('WORKSPACE'), 'data/brain_web_phantom')
+    path=os.path.join(os.getenv('WORKSPACE'), '/workspace', 'data/brain_web_phantom')
     image_path = os.path.join(path, 'object', 'gt_web_after_scaling.hdr')
     att_path = os.path.join(path, 'object', 'attenuat_brain_phantom.hdr')
 
@@ -227,7 +276,7 @@ if __name__ == "__main__":
     image = torch.from_numpy(image).unsqueeze(0).float().to(device)
     attenuation_map = torch.from_numpy(attenuation_map).unsqueeze(0).float().to(device)
 
-    path=os.path.join(os.getenv('WORKSPACE'), 'data/brain_web_phantom')
+    path=os.path.join(os.getenv('WORKSPACE'), '/workspace', 'data/brain_web_phantom')
     simu_dest_path = os.path.join(path, 'simu')
 
     prompt, meta = read_castor_binary_file(os.path.join(simu_dest_path, 'simu', 'simu_pt.s.hdr'), return_metadata=True)
@@ -254,14 +303,12 @@ if __name__ == "__main__":
     sinogram = system(image, attenuation_map=attenuation_map, scale=scale)
 
     sinogram = torch.poisson(sinogram) # add Poisson noise to simulate realistic PET data
-
-    bp = system.fbp(sinogram, filter_name='ramp', attenuation_map=attenuation_map, scale=scale)
-
-    recon_mlem = system.mlem(prompt, attenuation_map=attenuation_map, scale=scale, corr=corr, num_it=10)
+    
+    recon_fbp = system.fbp(sinogram=sinogram,filter_name='ramp', scale=scale * (.68))
 
     fig, ax = plt.subplots(1, 2, figsize=(10, 5))
     ax[0].imshow(prompt.cpu().squeeze(), cmap='gray')
     ax[0].set_title('Prompt Sinogram')
-    ax[1].imshow(recon_mlem.cpu().squeeze(), cmap='gray_r')
-    ax[1].set_title('MLEM Image')
+    ax[1].imshow(recon_fbp.cpu().squeeze(), cmap='gray_r')
+    ax[1].set_title('FBP Image')
     plt.show()
