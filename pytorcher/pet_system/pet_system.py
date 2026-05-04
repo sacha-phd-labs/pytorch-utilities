@@ -1,12 +1,12 @@
-import numpy
 import torch, math
+import os
 
 from pytorcher.utils.filters import apply_gaussian_psf_reflect, apply_columnwise_gaussian_psf
 
-from pytorcher.utils.fbp import iradon
-
 
 from pet_simulator import ParallelViewProjector2D
+from tools.framework.cacheable import Cacheable
+
 
 class PetProjection(torch.autograd.Function):
 
@@ -78,16 +78,19 @@ class PetBackward(torch.autograd.Function):
 
         return out, None, None
 
-class PetSystem(torch.nn.Module):
+class PetSystem(torch.nn.Module, Cacheable):
 
     def __init__(
             self,
             projector_type='parallelproj_parallel',
             projector_config={},
             gaussian_PSF=4.0,
-            device='cuda'
+            device='cuda',
+            cache_dir=None
         ):
-        super().__init__()
+        torch.nn.Module.__init__(self)
+        Cacheable.__init__(self, cache_dir=cache_dir)
+        
         # update config to enforce use of torch
         projector_config['array_compat'] = 'torch'
 
@@ -123,7 +126,7 @@ class PetSystem(torch.nn.Module):
 
         #
         if attenuation_map is not None:
-            assert image.shape == attenuation_map.shape, "Image and attenuation map must have the same shape."
+            assert  image.shape == attenuation_map.shape, "Image and attenuation map must have the same shape."
 
         # Image domain PSF
         if self.gaussian_PSF_fwhm_mm is not None:
@@ -237,25 +240,73 @@ class PetSystem(torch.nn.Module):
 
         return reconstructed_image     
 
-    def mlem(self, sinogram, num_it=10, attenuation_map=None, scale=None, corr=None, eps=1e-8):
-
+    def mlem(self, sinogram, num_it=10, attenuation_map=None, scale=None, corr=None, eps=1e-8, use_cache=True):
+        """MLEM reconstruction with per-image caching.
+        
+        Args:
+            sinogram: Batch of sinograms with shape (B, C, H, W)
+            num_it: Number of iterations
+            attenuation_map: Optional attenuation map
+            scale: Scale factor
+            corr: Correction term (random + scatter)
+            eps: Small epsilon for numerical stability
+            use_cache: Whether to use caching for individual images
+            
+        Returns:
+            Reconstructed images with shape (B, C, H_img, W_img)
+        """
+        batch_size = sinogram.shape[0]
+        
         if corr is None:
             corr = torch.zeros_like(sinogram)
-
-        # Compute snesitivity
-        sensitivity = self.forward_adjoint(torch.ones_like(sinogram))
-
-        x_0 = torch.ones((sinogram.shape[0], sinogram.shape[1], self.proj.img_shape[0], self.proj.img_shape[1]), device=sinogram.device)
-
-        for _ in range(num_it):
-
-            # E-step
-            y_hat = self.forward(x_0, attenuation_map=attenuation_map, scale=scale) + corr
-
-            # M-step
-            x_0 = x_0 * self.forward_adjoint(sinogram / (y_hat + eps)) / sensitivity
-
-        return x_0
+        
+        # Process each image in the batch
+        reconstructions = []
+        for b in range(batch_size):
+            # Extract individual sinogram and optional maps
+            sino_b = sinogram[b]  # Keep batch dimension for forward pass
+            sino_b = sino_b.unsqueeze(0)  # Add batch dimension back for processing
+            corr_b = corr[b] if corr is not None else None
+            if corr_b is not None:
+                corr_b = corr_b.unsqueeze(0)  # Add batch dimension back for processing
+            att_b = attenuation_map[b] if attenuation_map is not None else None
+            if att_b is not None:
+                att_b = att_b.unsqueeze(0)  # Add batch dimension back for processing
+            if scale is not None:
+                scale_b = scale[b] if isinstance(scale, torch.Tensor) else scale
+            else:
+                scale_b = None
+            
+            # Check cache if enabled
+            if use_cache:
+                cache_key = self.compute_cache_key(sino_b, num_it=num_it, attenuation_map=att_b, scale=scale_b, corr=corr_b)
+                cached_result = self.load_from_cache(cache_key, device=self.device)
+                if cached_result is not None:
+                    reconstructions.append(cached_result)
+                    continue
+            
+            # Compute sensitivity for this sinogram
+            sensitivity = self.forward_adjoint(torch.ones_like(sino_b), attenuation_map=att_b, scale=scale_b) + eps
+            
+            # Initialize reconstruction
+            x_0 = torch.ones((sino_b.shape[0], sino_b.shape[1], self.proj.img_shape[0], self.proj.img_shape[1]), device=sino_b.device)
+            
+            # MLEM iterations
+            for _ in range(num_it):
+                # E-step
+                y_hat = self.forward(x_0, attenuation_map=att_b, scale=scale_b) + corr_b
+                
+                # M-step
+                x_0 = x_0 * self.forward_adjoint(sino_b / (y_hat + eps), attenuation_map=att_b, scale=scale_b) / sensitivity
+            
+            # Save to cache if enabled
+            if use_cache:
+                self.save_to_cache(cache_key, x_0)
+            
+            reconstructions.append(x_0)
+        
+        # Concatenate all reconstructions along batch dimension
+        return torch.cat(reconstructions, dim=0)
 
 if __name__ == "__main__":
 
@@ -304,11 +355,11 @@ if __name__ == "__main__":
 
     sinogram = torch.poisson(sinogram) # add Poisson noise to simulate realistic PET data
     
-    recon_fbp = system.fbp(sinogram=sinogram,filter_name='ramp', scale=scale * (.68))
+    recon_mlem = system.mlem(sinogram=prompt, num_it=100, attenuation_map=attenuation_map, scale=scale, corr=corr, use_cache=False)
 
     fig, ax = plt.subplots(1, 2, figsize=(10, 5))
     ax[0].imshow(prompt.cpu().squeeze(), cmap='gray')
     ax[0].set_title('Prompt Sinogram')
-    ax[1].imshow(recon_fbp.cpu().squeeze(), cmap='gray_r')
-    ax[1].set_title('FBP Image')
+    ax[1].imshow(recon_mlem.cpu().squeeze(), cmap='gray_r')
+    ax[1].set_title('MLEM Image')
     plt.show()
