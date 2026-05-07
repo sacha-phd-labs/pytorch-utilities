@@ -25,7 +25,7 @@ class PetProjection(torch.autograd.Function):
             out = projector.project(img_detached, scale=scale)
 
         return out
-    
+
     @staticmethod
     def backward(ctx, grad_output):
 
@@ -60,7 +60,7 @@ class PetBackward(torch.autograd.Function):
             raise ValueError(f"Unknown combination of projector type and sino dimensions: {type(projector)} with sino.ndim={sino_detached.ndim}")
 
         return out
-    
+
     @staticmethod
     def backward(ctx, grad_output):
 
@@ -90,12 +90,12 @@ class PetSystem(torch.nn.Module, Cacheable):
         ):
         torch.nn.Module.__init__(self)
         Cacheable.__init__(self, cache_dir=cache_dir)
-        
+
         # update config to enforce use of torch
         projector_config['array_compat'] = 'torch'
 
         self.device = device
-        
+
         self.projector_config = projector_config
         self.projector_type = projector_type
         self.get_projection_operator()
@@ -111,17 +111,17 @@ class PetSystem(torch.nn.Module, Cacheable):
             self.proj = ParallelViewProjector2D(**self.projector_config)
         else:
             raise ValueError(f"Unknown projector type: {self.projector_type}")
-        
+
         self.proj.dev = self.device
 
     def project(self, image, scale=None):
 
         return PetProjection.apply(image, self.proj, scale)
-    
+
     def backward(self, sinogram, scale=None):
 
         return PetBackward.apply(sinogram, self.proj, scale)
-    
+
     def forward(self, image, attenuation_map=None, scale=None):
 
         #
@@ -157,7 +157,7 @@ class PetSystem(torch.nn.Module, Cacheable):
             sinogram = sinogram * torch.exp(-att_sino * self.voxel_size_mm[0]) # assuming square pixels
 
         # PSF in sinogram domain
-        if self.gaussian_PSF_fwhm_mm is not None: 
+        if self.gaussian_PSF_fwhm_mm is not None:
             sigma_mm = self.gaussian_PSF_fwhm_mm / (4.0 * (torch.log(torch.tensor(2.0)))**0.5)
             # 1D sigma in sinogram domain on each row
             bin_widths_mm = self.voxel_size_mm[0]
@@ -170,7 +170,7 @@ class PetSystem(torch.nn.Module, Cacheable):
     def filter_sinogram(sinogram, filter_name="ramp"):
 
         def get_fourier_filter( size, filter_name, device, dtype=torch.float32):
-            freqs = ( 2 * torch.fft.fftfreq(size, device=device).abs()).to(dtype)
+            freqs = ( 0.5 * torch.fft.fftfreq(size, device=device).abs()).to(dtype)
 
             if filter_name == "ramp":
                 filt = freqs
@@ -212,7 +212,7 @@ class PetSystem(torch.nn.Module, Cacheable):
         radon_filtered = torch.real(torch.fft.ifft(proj_fft, dim=1))[:, :num_detectors]
 
         return radon_filtered.reshape(*leading_shape, num_detectors, num_angles)
-    
+
     def forward_adjoint(self, sinogram, attenuation_map=None, scale=None):
         with torch.enable_grad():
             x_0 = torch.zeros((sinogram.shape[0], sinogram.shape[1], self.proj.img_shape[0], self.proj.img_shape[1]), device=sinogram.device, requires_grad=True)
@@ -220,7 +220,7 @@ class PetSystem(torch.nn.Module, Cacheable):
             prod_Ax_y = (Ax_0 * sinogram).sum()
             grad_Ax = torch.autograd.grad(prod_Ax_y, x_0)[0]
         return grad_Ax
-    
+
     def project_adjoint(self, sinogram, scale=None):
         with torch.enable_grad():
             x_0 = torch.zeros((sinogram.shape[0], sinogram.shape[1], self.proj.img_shape[0], self.proj.img_shape[1]), device=sinogram.device, requires_grad=True)
@@ -228,21 +228,34 @@ class PetSystem(torch.nn.Module, Cacheable):
             prod_Ax_y = (Ax_0 * sinogram).sum()
             grad_Ax = torch.autograd.grad(prod_Ax_y, x_0)[0]
         return grad_Ax
-    
+
     def fbp(self, sinogram, filter_name='ramp', scale=None):
 
-        # filter sinogram
-        sinogram = self.filter_sinogram(sinogram, filter_name=filter_name)
+        # Pre-scale sinogram if provided (e.g., for count normalization)
+        if scale is not None:
+            scale = self.proj._broadcast_scale(sinogram, scale)
+            sinogram = sinogram / scale
 
-        # backproject
-        sensitivity = self.backward(torch.ones_like(sinogram), scale=None)
-        reconstructed_image = self.backward(sinogram, scale=scale) / sensitivity
+        # Filter sinogram
+        filtered_sinogram = self.filter_sinogram(sinogram, filter_name=filter_name)
 
-        return reconstructed_image     
+        # Backproject the filtered sinogram (standard FBP)
+        reconstructed_image = self.backward(filtered_sinogram, scale=None)
+        
+        # Apply FBP normalization: scale by pi/(2*num_angles) for physical unit scaling
+        # This accounts for the discrete angular sampling
+        num_angles = sinogram.shape[-1]
+        fbp_norm = torch.tensor(torch.pi / (2.0 * num_angles), 
+                               dtype=reconstructed_image.dtype, 
+                               device=reconstructed_image.device)
+        
+        reconstructed_image = reconstructed_image * fbp_norm
+
+        return reconstructed_image
 
     def mlem(self, sinogram, num_it=10, attenuation_map=None, scale=None, corr=None, eps=1e-8, use_cache=True):
         """MLEM reconstruction with per-image caching.
-        
+
         Args:
             sinogram: Batch of sinograms with shape (B, C, H, W)
             num_it: Number of iterations
@@ -251,15 +264,15 @@ class PetSystem(torch.nn.Module, Cacheable):
             corr: Correction term (random + scatter)
             eps: Small epsilon for numerical stability
             use_cache: Whether to use caching for individual images
-            
+
         Returns:
             Reconstructed images with shape (B, C, H_img, W_img)
         """
         batch_size = sinogram.shape[0]
-        
+
         if corr is None:
             corr = torch.zeros_like(sinogram)
-        
+
         # Process each image in the batch
         reconstructions = []
         for b in range(batch_size):
@@ -276,7 +289,7 @@ class PetSystem(torch.nn.Module, Cacheable):
                 scale_b = scale[b] if isinstance(scale, torch.Tensor) else scale
             else:
                 scale_b = None
-            
+
             # Check cache if enabled
             if use_cache:
                 cache_key = self.compute_cache_key(sino_b, num_it=num_it, attenuation_map=att_b, scale=scale_b, corr=corr_b)
@@ -284,27 +297,27 @@ class PetSystem(torch.nn.Module, Cacheable):
                 if cached_result is not None:
                     reconstructions.append(cached_result)
                     continue
-            
+
             # Compute sensitivity for this sinogram
             sensitivity = self.forward_adjoint(torch.ones_like(sino_b), attenuation_map=att_b, scale=scale_b) + eps
-            
+
             # Initialize reconstruction
             x_0 = torch.ones((sino_b.shape[0], sino_b.shape[1], self.proj.img_shape[0], self.proj.img_shape[1]), device=sino_b.device)
-            
+
             # MLEM iterations
             for _ in range(num_it):
                 # E-step
                 y_hat = self.forward(x_0, attenuation_map=att_b, scale=scale_b) + corr_b
-                
+
                 # M-step
                 x_0 = x_0 * self.forward_adjoint(sino_b / (y_hat + eps), attenuation_map=att_b, scale=scale_b) / sensitivity
-            
+
             # Save to cache if enabled
             if use_cache:
                 self.save_to_cache(cache_key, x_0)
-            
+
             reconstructions.append(x_0)
-        
+
         # Concatenate all reconstructions along batch dimension
         return torch.cat(reconstructions, dim=0)
 
@@ -332,12 +345,15 @@ if __name__ == "__main__":
 
     prompt, meta = read_castor_binary_file(os.path.join(simu_dest_path, 'simu', 'simu_pt.s.hdr'), return_metadata=True)
     scale = float(meta['scale_factor'])
+    # scale = None
     random = read_castor_binary_file(os.path.join(simu_dest_path, 'simu', 'simu_rd.s.hdr'))
     scatter = read_castor_binary_file(os.path.join(simu_dest_path, 'simu', 'simu_sc.s.hdr'))
+    nfpt = read_castor_binary_file(os.path.join(simu_dest_path, 'simu', 'simu_nfpt.s.hdr'))
     corr = random + scatter
 
     prompt = torch.from_numpy(prompt).unsqueeze(0).float().to(device)
     corr = torch.from_numpy(corr).unsqueeze(0).float().to(device)
+    nfpt = torch.from_numpy(nfpt).unsqueeze(0).float().to(device)
 
     system = PetSystem(
         projector_type='parallelproj_parallel',
@@ -351,15 +367,22 @@ if __name__ == "__main__":
         device=device
     )
 
-    sinogram = system(image, attenuation_map=attenuation_map, scale=scale)
+    sinogram = system(image, attenuation_map=None, scale=scale)  # Test FBP without attenuation/scale
 
-    sinogram = torch.poisson(sinogram) # add Poisson noise to simulate realistic PET data
-    
-    recon_mlem = system.mlem(sinogram=prompt, num_it=100, attenuation_map=attenuation_map, scale=scale, corr=corr, use_cache=False)
+    # sinogram = torch.poisson(sinogram) # add Poisson noise to simulate realistic PET data
 
-    fig, ax = plt.subplots(1, 2, figsize=(10, 5))
-    ax[0].imshow(prompt.cpu().squeeze(), cmap='gray')
+    recon_mlem = system.mlem(sinogram=prompt, num_it=1, attenuation_map=attenuation_map, scale=scale, corr=corr, use_cache=False, eps=1)
+    # recon_mlem = system.mlem(sinogram=sinogram, num_it=100, attenuation_map=attenuation_map, scale=scale * 0.68, corr=None, use_cache=False, eps=1)
+    # recon_fbp = system.fbp(sinogram=nfpt, scale=scale)
+    recon_fbp = system.fbp(sinogram=sinogram, scale=scale, filter_name='ramp')  # No scale for testing
+
+    print(recon_fbp.min(), recon_fbp.max())
+
+    fig, ax = plt.subplots(1, 3, figsize=(10, 5))
+    ax[0].imshow(sinogram.cpu().squeeze(), cmap='gray')
     ax[0].set_title('Prompt Sinogram')
     ax[1].imshow(recon_mlem.cpu().squeeze(), cmap='gray_r')
     ax[1].set_title('MLEM Image')
+    ax[2].imshow(recon_fbp.cpu().squeeze(), cmap='gray_r')
+    ax[2].set_title('FBP Image')
     plt.show()
