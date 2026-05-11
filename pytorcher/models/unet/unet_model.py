@@ -17,6 +17,7 @@ class UNet(nn.Module):
                  residual_conv=False,
                  init='none',
                  dropout=0.0,
+                 norm=None,
         ):
         """
         :param n_channels: Number of input channels
@@ -29,6 +30,7 @@ class UNet(nn.Module):
         :param residual: Whether to use residual connection between input and output of the U-Net.
         :param residual_conv: Whether to use residual connections in double convolution blocks.
         :param dropout: Dropout probability for the dropout layers. If 0.0, no dropout will be applied.
+        :param norm: Type of normalization to use. Supported values are 'bn' (Batch Normalization) and None.
         """
         super(UNet, self).__init__()
         self.n_channels = n_channels
@@ -37,10 +39,11 @@ class UNet(nn.Module):
         assert n_levels in [3, 4], "Only 3 or 4 levels are supported currently."
         self.n_levels = n_levels
         self.residual = residual
+        self.norm = norm
         init = init if not residual else 'none' # If using residual connection between input and output, initialize the output convolution layer with zeros to start with an identity mapping.
         #
         conv_layer_type_no_separable = conv_layer_type.replace('Separable', '') # Ensure that separable convolutions are not used in initial, upsampling, and output layers
-        self.inc = (DoubleConv(n_channels, global_conv, layer_type=conv_layer_type_no_separable, residual=residual_conv, init=init)) # Initial layer uses standard convolution
+        self.inc = (DoubleConv(n_channels, global_conv, layer_type=conv_layer_type_no_separable, residual=residual_conv, init=init, norm=norm)) # Initial layer uses standard convolution
         #
         self.downs = nn.ModuleList()
         self.ups = nn.ModuleList()
@@ -48,15 +51,15 @@ class UNet(nn.Module):
         for i in range(1,n_levels+1):
             j = n_levels - i + 1
             if i < n_levels:
-                self.downs.append(Down(global_conv*(2**(i-1)), global_conv*(2**i), layer_type=conv_layer_type, residual=residual_conv, init=init, dropout=dropout))
-                self.ups.append(Up(global_conv*(2**j), (global_conv*(2**(j-1))) // factor, bilinear, layer_type=conv_layer_type, residual=residual_conv, init=init, dropout=dropout))
+                self.downs.append(Down(global_conv*(2**(i-1)), global_conv*(2**i), layer_type=conv_layer_type, residual=residual_conv, init=init, dropout=dropout, norm=norm))
+                self.ups.append(Up(global_conv*(2**j), (global_conv*(2**(j-1))) // factor, bilinear, layer_type=conv_layer_type, residual=residual_conv, init=init, dropout=dropout, norm=norm))
             else:
-                bottleneck = [Down(global_conv*(2**(i-1)), (global_conv*(2**i)) // factor, layer_type=conv_layer_type, residual=residual_conv, init=init, dropout=dropout)]
+                bottleneck = [Down(global_conv*(2**(i-1)), (global_conv*(2**i)) // factor, layer_type=conv_layer_type, residual=residual_conv, init=init, dropout=dropout, norm=norm)]
                 in_out_ratio = self.get_in_out_ratio()
                 if in_out_ratio != (1.0,1.0):
-                    bottleneck.append(ResizeConv((global_conv*(2**i)) // factor, scale_factor=in_out_ratio, mode='bilinear', layer_type=conv_layer_type_no_separable, residual=residual_conv, init=init, dropout=dropout))
+                    bottleneck.append(ResizeConv((global_conv*(2**i)) // factor, scale_factor=in_out_ratio, mode='bilinear', layer_type=conv_layer_type_no_separable, residual=residual_conv, init=init, dropout=dropout, norm=norm)) # Use standard convolution in the ResizeConv layer to ensure that the output has the same number of channels as the input to the corresponding upsampling layer in the decoder.
                 self.downs.append(nn.Sequential(*bottleneck))
-                self.ups.append(Up(global_conv*(2**j), (global_conv*(2**(j-1))), bilinear, layer_type=conv_layer_type, residual=residual_conv, init=init, dropout=dropout))
+                self.ups.append(Up(global_conv*(2**j), (global_conv*(2**(j-1))), bilinear, layer_type=conv_layer_type, residual=residual_conv, init=init, dropout=dropout, norm=norm))
         #
         if self.residual:
             assert n_channels == n_classes, "For residual connection between input and output, the number of input channels must be equal to the number of output channels."
