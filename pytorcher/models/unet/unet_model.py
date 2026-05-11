@@ -69,6 +69,8 @@ class UNet(nn.Module):
                 self.out_act = nn.Softplus()
             elif self.out_act == 'sigmoid':
                 self.out_act = nn.Sigmoid()
+            elif self.out_act == 'relu':
+                self.out_act = nn.ReLU()
             elif self.out_act is None or self.out_act.lower() == 'none':
                 self.out_act = nn.Identity()
         self.outc = (OutConv(global_conv, n_classes, conv_layer_type=conv_layer_type_no_separable, act=out_act, init=init)) # Output layer uses standard convolution

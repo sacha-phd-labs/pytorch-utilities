@@ -131,11 +131,11 @@ class DoubleConv(nn.Module):
             raise ValueError(f"Unsupported initialization '{init}' for DoubleConv layers. Supported initializations are 'dirac' and 'zeros'.")
         self.double_conv = nn.Sequential(
             conv1,
-            nn.LeakyReLU(inplace=True),
+            nn.ReLU(inplace=True),
             self.dropout,
             conv2,
         )
-        self.act = nn.LeakyReLU(inplace=True)
+        self.act = nn.ReLU(inplace=True)
         if residual and in_channels != out_channels:
             # If residual and dimensions do not match, add a 1x1 convolution to add a learnable projection and match dimensions
             conv_layer_type_no_separable = layer_type.replace('Separable', '')
@@ -238,6 +238,8 @@ class OutConv(nn.Module):
             self.act = nn.Sigmoid()
         elif act is not None and act.lower() == 'softplus':
             self.act = nn.Softplus()
+        elif act is not None and act.lower() == 'relu':
+            self.act = nn.ReLU()
         elif act is None or act.lower() == 'none':
             self.act = nn.Identity()
         else:
